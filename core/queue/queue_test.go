@@ -2,7 +2,9 @@ package queue
 
 import (
 	"fmt"
+	"io/fs"
 	"log"
+	"os"
 	"reflect"
 	"sync"
 	"testing"
@@ -12,10 +14,10 @@ import (
 )
 
 func TestEnqueue(t *testing.T) {
-	path := fmt.Sprintf("/tmp/queue_test%d", time.Now().Unix())
+	path := fmt.Sprintf("/tmp/queue_test/%d", time.Now().Unix())
 	config.InitConfig(config.Settings{
 		StoragePath: &path,
-		MaxPartSize: 47,
+		MaxPartSize: 100,
 	})
 
 	q := GetQueue("queue1")
@@ -41,19 +43,69 @@ func TestEnqueue(t *testing.T) {
 			Id:          4,
 			Data:        "Message 4",
 		},
+		{
+			ContentType: core.TypeText,
+			Id:          5,
+			Data:        "Message 5",
+		},
 	}
 	q.Enqueue(&core.Operation{
 		Op:       core.OpPublish,
 		Target:   "exchange1",
-		Messages: expected,
+		Messages: expected[0:3],
 	})
 
-	actual := q.Consume(42, 2, 1*time.Second)
-	actual = append(actual, q.Consume(42, 1, 1*time.Second)...)
-	actual = append(actual, q.Consume(42, 1, 1*time.Second)...)
+	q.Enqueue(&core.Operation{
+		Op:       core.OpPublish,
+		Target:   "exchange1",
+		Messages: expected[3:4],
+	})
+
+	q.Enqueue(&core.Operation{
+		Op:       core.OpPublish,
+		Target:   "exchange1",
+		Messages: expected[4:],
+	})
+
+	actual := q.Consume(42, 2, 0)
+	actual = append(actual, q.Consume(42, 1, 0)...)
+	actual = append(actual, q.Consume(42, 1, 0)...)
+	actual = append(actual, q.Consume(42, 2, 0)...)
+
+	ids := make([]int64, 0)
+
+	for _, m := range actual {
+		ids = append(ids, m.Id)
+	}
+
+	q.Ack(42, ids)
 
 	if !reflect.DeepEqual(actual, expected) {
 		t.Errorf("queue failed, expected %v, actual %v", expected, actual)
+	}
+
+	q2 := GetQueue("queue1")
+
+	actual = q2.Consume(42, 100, 0)
+
+	if len(actual) > 0 {
+		t.Errorf("consume failed, expected %v, actual %v", 0, len(actual))
+	}
+
+	files, err := fs.Glob(os.DirFS(path), "*/*/*")
+
+	if err != nil {
+		t.Error(err)
+	}
+
+	expectedFiles := []string{
+		"queue/queue1/consume.ref",
+		"queue/queue1/publish.ref",
+		"queue/queue1/queue.1",
+		"queue/queue1/queue.1.status",
+	}
+	if !reflect.DeepEqual(files, expectedFiles) {
+		t.Errorf("cleanup failed, expected %v, actual %v", expectedFiles, files)
 	}
 }
 
@@ -66,8 +118,8 @@ func TestEnqueueLarge(t *testing.T) {
 
 	q := GetQueue("queue1")
 
-	threads := 1000
-	ops := 10
+	threads := 100000
+	ops := 100
 	messages := 1
 
 	var wg sync.WaitGroup
@@ -98,7 +150,15 @@ func TestEnqueueLarge(t *testing.T) {
 
 	log.Printf("Consuming %d messages", threads*messages*ops)
 
-	actual := q.Consume(42, 200000000, 1*time.Second)
+	actual := q.Consume(42, 200000000, 0)
+
+	ids := make([]int64, 0)
+
+	for _, m := range actual {
+		ids = append(ids, m.Id)
+	}
+
+	q.Ack(42, ids)
 
 	if len(actual) != threads*messages*ops {
 		t.Errorf("queue failed, expected %v, actual %v", threads*messages*ops, len(actual))

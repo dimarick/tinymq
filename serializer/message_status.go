@@ -13,17 +13,12 @@ func SerializeMessageStatus(buffer []byte, messageId int64, object core.MessageS
 		return nil, err
 	}
 
-	buffer, err = binary.Append(buffer, binary.LittleEndian, object.Ptr)
+	buffer, err = binary.Append(buffer, binary.LittleEndian, int32(object.Ptr))
 	if err != nil {
 		return nil, err
 	}
 
-	buffer, err = binary.Append(buffer, binary.LittleEndian, object.Size)
-	if err != nil {
-		return nil, err
-	}
-
-	buffer, err = binary.Append(buffer, binary.LittleEndian, object.ConsumerId)
+	buffer, err = binary.Append(buffer, binary.LittleEndian, int32(object.Size))
 	if err != nil {
 		return nil, err
 	}
@@ -62,20 +57,21 @@ func DeserializeMessageStatus(reader io.Reader) (int64, core.MessageStatus, erro
 		return messageId, object, err
 	}
 
-	err = binary.Read(reader, binary.LittleEndian, &object.Ptr)
+	ptr := int32(0)
+	size := int32(0)
+
+	err = binary.Read(reader, binary.LittleEndian, &ptr)
 	if err != nil {
 		return messageId, object, err
 	}
 
-	err = binary.Read(reader, binary.LittleEndian, &object.Size)
+	err = binary.Read(reader, binary.LittleEndian, &size)
 	if err != nil {
 		return messageId, object, err
 	}
 
-	err = binary.Read(reader, binary.LittleEndian, &object.ConsumerId)
-	if err != nil {
-		return messageId, object, err
-	}
+	object.Ptr = int64(ptr)
+	object.Size = int64(size)
 
 	err = binary.Read(reader, binary.LittleEndian, &object.Status)
 	if err != nil {
