@@ -13,12 +13,7 @@ func SerializeMessage(buffer []byte, object core.Message) ([]byte, error) {
 		return nil, err
 	}
 
-	buffer, err = binary.Append(buffer, binary.LittleEndian, int8(len(object.Id)))
-	if err != nil {
-		return nil, err
-	}
-
-	buffer, err = binary.Append(buffer, binary.LittleEndian, []byte(object.Id))
+	buffer, err = binary.Append(buffer, binary.LittleEndian, object.Id)
 	if err != nil {
 		return nil, err
 	}
@@ -60,19 +55,10 @@ func DeserializeMessage(reader io.Reader) (core.Message, error) {
 		return object, err
 	}
 
-	var idSize int8 = 0
-	err = binary.Read(reader, binary.LittleEndian, &idSize)
+	err = binary.Read(reader, binary.LittleEndian, &object.Id)
 	if err != nil {
 		return object, err
 	}
-
-	id := make([]byte, idSize)
-	err = binary.Read(reader, binary.LittleEndian, id)
-	if err != nil {
-		return object, err
-	}
-
-	object.Id = string(id)
 
 	var dataSize int32 = 0
 	err = binary.Read(reader, binary.LittleEndian, &dataSize)

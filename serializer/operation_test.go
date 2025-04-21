@@ -8,13 +8,13 @@ import (
 )
 
 func TestSerializeOperation(t *testing.T) {
-	expected := []byte{116, 110, 109, 113, 0x82, 1, 0, 0, 0, 0, 14, 83, 111, 109, 101, 32, 73, 100, 101, 110, 116, 105, 102, 101, 114, 16, 0, 0, 0, 123, 34, 116, 101, 115, 116, 34, 58, 32, 34, 100, 97, 116, 97, 34, 125}
+	expected := []byte{116, 110, 109, 113, 130, 1, 0, 0, 0, 0, 233, 2, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 123, 34, 116, 101, 115, 116, 34, 58, 32, 34, 100, 97, 116, 97, 34, 125}
 	actual, err := SerializeOperation(nil, core.Operation{
 		Op: core.OpAck,
 		Messages: []core.Message{
 			{
 				ContentType: core.TypeJson,
-				Id:          "Some Identifer",
+				Id:          745,
 				Data:        "{\"test\": \"data\"}",
 			},
 		},
@@ -30,7 +30,7 @@ func TestSerializeOperation(t *testing.T) {
 }
 
 func TestDeserializeOperation(t *testing.T) {
-	buffer := []byte{116, 110, 109, 113, 0x82, 1, 0, 0, 0, 0, 14, 83, 111, 109, 101, 32, 73, 100, 101, 110, 116, 105, 102, 101, 114, 16, 0, 0, 0, 123, 34, 116, 101, 115, 116, 34, 58, 32, 34, 100, 97, 116, 97, 34, 125}
+	buffer := []byte{116, 110, 109, 113, 130, 1, 0, 0, 0, 0, 233, 2, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 123, 34, 116, 101, 115, 116, 34, 58, 32, 34, 100, 97, 116, 97, 34, 125}
 	actual, err := DeserializeOperation(bytes.NewReader(buffer))
 
 	if err != nil {
@@ -42,7 +42,7 @@ func TestDeserializeOperation(t *testing.T) {
 		Messages: []core.Message{
 			{
 				ContentType: core.TypeJson,
-				Id:          "Some Identifer",
+				Id:          745,
 				Data:        "{\"test\": \"data\"}",
 			},
 		},

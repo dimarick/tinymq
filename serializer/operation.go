@@ -37,7 +37,7 @@ func DeserializeOperation(reader io.Reader) (core.Operation, error) {
 	}
 
 	if core.OperationSignature != string(signature) {
-		return object, errors.New("invalid operation signature")
+		return object, errors.New("invalid binary data signature")
 	}
 
 	err = binary.Read(reader, binary.LittleEndian, &object.Op)

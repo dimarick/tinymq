@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 	"tinymq/config"
@@ -29,7 +30,14 @@ type QueueDescriptor struct {
 	consumerChannels       []chan core.Operation
 	flushDataMutex         sync.Mutex
 	flushDataPtr           int64
-	err                    error
+	messageStatus          *core.MessageStatusMap
+	//messageStatusFileMutex   sync.Mutex
+	//messageStatusFile        map[int64]*os.File
+	connectedConsumers sync.Map
+	consumeMutex       sync.Mutex
+	readerMutex        sync.Mutex
+	flushStatusMutex   sync.Mutex
+	err                error
 }
 
 var queues = make(map[string]*QueueDescriptor)
@@ -45,22 +53,37 @@ func GetQueue(name string) *QueueDescriptor {
 }
 
 func (queue *QueueDescriptor) Enqueue(operation *core.Operation) {
+	if queue.enqueueAsync(operation) {
+		return
+	}
+
+	queue.flushWait(queue.publishRef.Ptr)
+}
+
+func (queue *QueueDescriptor) enqueueAsync(operation *core.Operation) bool {
 	if queue.err != nil {
 		log.Panic(queue.err)
-
-		return
 	}
 
 	if queue.directDispatchConsumers(operation) {
-		return
+		return true
 	}
 
-	data, err := serializer.SerializeOperation(nil, *operation)
+	var err error
 
-	if err != nil {
-		log.Panic(err)
+	data := make([]byte, 0, 1024)
+	for _, message := range operation.Messages {
+		data, err = serializer.SerializeOperation(data, core.Operation{
+			Op:     operation.Op,
+			Target: operation.Target,
+			Messages: []core.Message{
+				message,
+			},
+		})
 
-		return
+		if err != nil {
+			log.Panic(err)
+		}
 	}
 
 	queue.publishDataWriterMutex.Lock()
@@ -70,8 +93,6 @@ func (queue *QueueDescriptor) Enqueue(operation *core.Operation) {
 	if err != nil {
 		queue.publishDataWriterMutex.Unlock()
 		log.Panic(err)
-
-		return
 	}
 
 	if queue.publishRef.Ptr > config.GetConfig().MaxPartSize {
@@ -79,22 +100,20 @@ func (queue *QueueDescriptor) Enqueue(operation *core.Operation) {
 	}
 
 	queue.publishDataWriterMutex.Unlock()
-
-	queue.flushWait(queue.publishRef.Ptr)
+	return false
 }
 
-func (queue *QueueDescriptor) Consume(n int, timeout time.Duration) []core.Message {
+func (queue *QueueDescriptor) Consume(consumerId int64, n int, timeout time.Duration) []core.Message {
 	if queue.err != nil {
 		log.Panic(queue.err)
-
-		return nil
 	}
 
 	queue.flushWait(queue.publishRef.Ptr)
 
-	var mutex sync.Mutex
-	mutex.Lock()
-	defer mutex.Unlock()
+	queue.consumeMutex.Lock()
+	defer queue.consumeMutex.Unlock()
+
+	queue.connectedConsumers.Store(consumerId, true)
 
 	reader := serializer.NewCountedReader(bufio.NewReader(queue.consumeDataFile))
 	messages := make([]core.Message, 0)
@@ -115,25 +134,12 @@ func (queue *QueueDescriptor) Consume(n int, timeout time.Duration) []core.Messa
 
 		if err != nil {
 			log.Panic(err)
-
-			return nil
 		}
-
-		reader.ResetCount()
-		operation, err := serializer.DeserializeOperation(reader)
-
-		if err != nil {
-			log.Panic(err)
-
-			return nil
-		}
-
-		messages = append(messages, operation.Messages...)
-		queue.consumeRef.Ptr += reader.Count()
 
 		// At end of file
 		if stat.Size() == queue.consumeRef.Ptr {
 			if queue.consumeRef.Id != queue.publishRef.Id {
+				queue.flushStatus(queue.consumeRef.Id, queue.messageStatus.LoadFile(queue.consumeRef.Id))
 				queue.rotateConsumeQueuePart()
 				reader = serializer.NewCountedReader(bufio.NewReader(queue.consumeDataFile))
 				continue
@@ -141,6 +147,44 @@ func (queue *QueueDescriptor) Consume(n int, timeout time.Duration) []core.Messa
 
 			break
 		}
+
+		reader.ResetCount()
+		operation, err := serializer.DeserializeOperation(reader)
+
+		if err != nil {
+			log.Panic(err)
+		}
+
+		if len(operation.Messages) > 1 {
+			log.Panic(errors.New("More than one message is unexpected"))
+		}
+
+		for _, message := range operation.Messages {
+			messageStatus, ok := queue.messageStatus.Load(queue.consumeRef.Id, message.Id)
+
+			if ok {
+				if messageStatus.Status == core.StatusAck || messageStatus.Status == core.StatusRequeue {
+					continue
+				}
+
+				_, ok = queue.connectedConsumers.Load(messageStatus.ConsumerId)
+				if messageStatus.Status == core.StatusPending && ok {
+					continue
+				}
+
+				// else consumer dead, message not pending now
+			}
+
+			messages = append(messages, message)
+
+			queue.messageStatus.Store(queue.consumeRef.Id, message.Id, core.MessageStatus{
+				Ptr:        queue.consumeRef.Ptr,
+				Size:       reader.Count(),
+				ConsumerId: consumerId,
+				Status:     core.StatusPending,
+			})
+		}
+		queue.consumeRef.Ptr += reader.Count()
 	}
 
 	if len(messages) == 0 {
@@ -151,28 +195,227 @@ func (queue *QueueDescriptor) Consume(n int, timeout time.Duration) []core.Messa
 
 	if err != nil {
 		log.Panic(err)
-
-		return nil
 	}
 
 	queue.consumeRef.Ptr = offset
 	SetRef(queue.consumeRefFile, queue.consumeRef)
 
+	queue.flushStatus(queue.consumeRef.Id, queue.messageStatus.LoadFile(queue.consumeRef.Id))
+
 	return messages
+}
+
+func (queue *QueueDescriptor) confirm(consumerId int64, messageIds []int64, confirmStatus uint8, requeue bool) {
+	filesProcessed := make(map[int64]map[int64]core.MessageStatus, 0)
+	for _, entry := range queue.messageStatus.Range() {
+		for _, messageId := range messageIds {
+			messageStatus := entry.Status
+
+			if entry.MessageId == messageId && messageStatus.ConsumerId == consumerId {
+				messageStatus.Status = confirmStatus
+
+				status, ok := filesProcessed[entry.FileId]
+				if !ok {
+					status = map[int64]core.MessageStatus{}
+					filesProcessed[entry.FileId] = status
+				}
+
+				status[entry.MessageId] = messageStatus
+			}
+		}
+	}
+
+	for id, status := range filesProcessed {
+		if requeue {
+			queue.requeue(id, status)
+			ptr := queue.publishRef.Ptr
+			queue.flushStatus(id, status)
+			queue.flushWait(ptr)
+		} else {
+			queue.flushStatus(id, status)
+		}
+	}
+}
+
+func (queue *QueueDescriptor) Ack(consumerId int64, messageIds []int64) {
+	queue.confirm(consumerId, messageIds, core.StatusAck, false)
+}
+
+func (queue *QueueDescriptor) Reject(consumerId int64, messageIds []int64) {
+	queue.confirm(consumerId, messageIds, core.StatusReject, false)
+}
+
+func (queue *QueueDescriptor) Requeue(consumerId int64, messageIds []int64) {
+	queue.confirm(consumerId, messageIds, core.StatusRequeue, true)
+}
+
+func (queue *QueueDescriptor) requeue(fileId int64, status map[int64]core.MessageStatus) {
+	operations, err := queue.readMessages(fileId, status)
+
+	if err != nil {
+		log.Panic(err)
+	}
+
+	for _, operation := range operations {
+		queue.enqueueAsync(&core.Operation{
+			Op:       core.OpRequeue,
+			Target:   operation.Target,
+			Messages: operation.Messages,
+		})
+	}
+}
+
+func (queue *QueueDescriptor) readMessages(fileId int64, status map[int64]core.MessageStatus) ([]core.Operation, error) {
+	queue.readerMutex.Lock()
+	defer queue.readerMutex.Unlock()
+	consumeDataPath := fmt.Sprintf("%s/queue.%d", queue.queueDataPath, fileId)
+	consumeDataFile, err := os.OpenFile(consumeDataPath, os.O_RDONLY, 0666)
+
+	operations := make([]core.Operation, 0)
+
+	if err != nil {
+		return operations, err
+	}
+
+	defer consumeDataFile.Close()
+
+	for _, messageStatus := range status {
+		if messageStatus.Status != core.StatusRequeue {
+			continue
+		}
+
+		_, err = consumeDataFile.Seek(messageStatus.Ptr, io.SeekStart)
+
+		if err != nil {
+			return operations, err
+		}
+
+		operation, err := serializer.DeserializeOperation(consumeDataFile)
+
+		if err != nil {
+			return operations, err
+		}
+
+		operations = append(operations, operation)
+	}
+
+	return operations, nil
+}
+
+func (queue *QueueDescriptor) flushStatus(fileId int64, status map[int64]core.MessageStatus) {
+	queue.flushStatusMutex.Lock()
+	defer queue.flushStatusMutex.Unlock()
+	consumeDataPath := fmt.Sprintf("%s/queue.%d", queue.queueDataPath, fileId)
+	consumeDataStatusPath := fmt.Sprintf("%s/queue.%d.status", queue.queueDataPath, fileId)
+	consumeDataStatusFile, err := os.OpenFile(consumeDataStatusPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0666)
+
+	if errors.Is(err, os.ErrExist) {
+		consumeDataStatusFile, err = os.OpenFile(consumeDataStatusPath, os.O_WRONLY|os.O_EXCL, 0666)
+	}
+
+	if err != nil {
+		log.Panic(err)
+	}
+
+	defer consumeDataStatusFile.Close()
+
+	ackBytes := int64(0)
+
+	if fileId == queue.publishRef.Id {
+		for _, messageStatus := range status {
+			if messageStatus.Status == core.StatusPending {
+				continue
+			}
+
+			ackBytes += messageStatus.Size
+		}
+	}
+
+	consumeDataFile, err := os.OpenFile(consumeDataPath, os.O_RDONLY|os.O_EXCL, 0666)
+
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			consumeDataFile = nil
+		} else {
+			log.Panic(err)
+		}
+	}
+
+	if consumeDataFile != nil {
+		defer consumeDataFile.Close()
+		stat, err := consumeDataFile.Stat()
+		if err != nil {
+			log.Panic(err)
+		}
+
+		if stat.Size() == ackBytes {
+			queue.messageStatus.DeleteFile(fileId)
+			defer os.Remove(consumeDataStatusPath)
+			defer os.Remove(consumeDataPath)
+			return
+		}
+	}
+
+	buffer, err := serializer.SerializeMessageStatuses(nil, status)
+
+	if err != nil {
+		log.Panic(err)
+	}
+
+	_, err = consumeDataStatusFile.WriteAt(buffer, ackBytes)
+
+	if err != nil {
+		log.Panic(err)
+	}
+}
+
+func (queue *QueueDescriptor) loadStatus(fileId int64) map[int64]core.MessageStatus {
+	consumeDataStatusPath := fmt.Sprintf("%s/queue.%d.status", queue.queueDataPath, fileId)
+	consumeDataStatusFile, err := os.OpenFile(consumeDataStatusPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
+
+	if err != nil {
+		log.Panic(err)
+	}
+
+	defer consumeDataStatusFile.Close()
+
+	stat, err := consumeDataStatusFile.Stat()
+
+	if err != nil {
+		log.Panic(err)
+	}
+
+	if stat.Size() == 0 {
+		return map[int64]core.MessageStatus{}
+	}
+
+	reader := bufio.NewReader(consumeDataStatusFile)
+	result, err := serializer.DeserializeMessageStatuses(reader)
+
+	if err != nil {
+		log.Panic(err)
+	}
+
+	for id, messageStatus := range result {
+		if messageStatus.Status != core.StatusPending && messageStatus.Status != core.StatusReject {
+			continue
+		}
+
+		// when server restarted, all pending statuses is rejected and does not matter
+		delete(result, id)
+	}
+
+	return result
 }
 
 func (queue *QueueDescriptor) rotateConsumeQueuePart() {
 	queue.consumeRef.Id++
 	queue.consumeRef.Ptr = 0
 
-	fileNameToRemove := queue.consumeDataFile.Name()
-
 	SetRef(queue.consumeRefFile, queue.consumeRef)
 	err := queue.consumeRefFile.Sync()
 	if err != nil {
 		log.Panic(err)
-
-		return
 	}
 
 	consumeDataFilePath := fmt.Sprintf("%s/queue.%d", queue.queueDataPath, queue.consumeRef.Id)
@@ -188,10 +431,7 @@ func (queue *QueueDescriptor) rotateConsumeQueuePart() {
 
 	if err != nil {
 		log.Panic(err)
-		return
 	}
-
-	go os.Remove(fileNameToRemove)
 }
 
 func initQueue(name string) *QueueDescriptor {
@@ -211,35 +451,30 @@ func initQueue(name string) *QueueDescriptor {
 		err := os.MkdirAll(queueDataPath, 0777)
 		if err != nil {
 			log.Panic(err)
-			return nil
 		}
 
 		consumeRefFile, err := os.OpenFile(consumeRefFilePath, os.O_RDWR|os.O_CREATE, 0666)
 
 		if err != nil {
 			log.Panic(err)
-			return nil
 		}
 
 		_, err = consumeRefFile.Seek(0, 0)
 
 		if err != nil {
 			log.Panic(err)
-			return nil
 		}
 
 		publishRefFile, err := os.OpenFile(publishRefFilePath, os.O_RDWR|os.O_CREATE, 0666)
 
 		if err != nil {
 			log.Panic(err)
-			return nil
 		}
 
 		_, err = publishRefFile.Seek(0, 0)
 
 		if err != nil {
 			log.Panic(err)
-			return nil
 		}
 
 		result := new(QueueDescriptor)
@@ -254,21 +489,18 @@ func initQueue(name string) *QueueDescriptor {
 
 		if err != nil {
 			log.Panic(err)
-			return nil
 		}
 
 		consumeDataFile, err := os.OpenFile(consumeDataFilePath, os.O_RDWR|os.O_CREATE, 0666)
 
 		if err != nil {
 			log.Panic(err)
-			return nil
 		}
 
 		stat, err := publishDataFile.Stat()
 
 		if err != nil {
 			log.Panic(err)
-			return nil
 		}
 
 		publishRef.Ptr = stat.Size()
@@ -282,7 +514,10 @@ func initQueue(name string) *QueueDescriptor {
 			consumeDataFile:   consumeDataFile,
 			publishRef:        publishRef,
 			consumeRef:        consumeRef,
+			messageStatus:     core.NewMessageStatusMap(),
 		}
+
+		result.messageStatus.StoreFile(consumeRef.Id, result.loadStatus(consumeRef.Id))
 
 		go result.flushLoop()
 
@@ -299,17 +534,15 @@ func (queue *QueueDescriptor) rotatePublishQueuePart() {
 
 	if err != nil {
 		log.Panic(err)
-
-		return
 	}
 
 	err = queue.publishDataFile.Sync()
 
 	if err != nil {
 		log.Panic(err)
-
-		return
 	}
+
+	prevPublishDataFile := queue.publishDataFile
 
 	queue.publishRef.Id++
 
@@ -319,22 +552,16 @@ func (queue *QueueDescriptor) rotatePublishQueuePart() {
 
 	if err != nil {
 		log.Panic(err)
-
-		return
 	}
 
 	stat, err := publishDataFile.Stat()
 
 	if err != nil {
 		log.Panic(err)
-
-		return
 	}
 
 	if stat.Size() > 0 {
 		log.Panic(errors.New("Size greater than 0"))
-
-		return
 	}
 
 	queue.publishRef.Ptr = 0
@@ -346,9 +573,13 @@ func (queue *QueueDescriptor) rotatePublishQueuePart() {
 	err = queue.publishRefFile.Sync()
 	if err != nil {
 		log.Panic(err)
-
-		return
 	}
+
+	go func() {
+		queue.publishDataWriterMutex.Lock()
+		err = prevPublishDataFile.Close()
+		queue.publishDataWriterMutex.Unlock()
+	}()
 }
 
 func (queue *QueueDescriptor) waitQueueWithTimeout(timeout time.Duration) []core.Message {
@@ -439,11 +670,10 @@ func (queue *QueueDescriptor) flushWait(target int64) {
 	for {
 		if queue.err != nil {
 			log.Panic(queue.err)
-
-			return
 		}
 
 		time.Sleep(500 * time.Microsecond)
+		runtime.Gosched()
 		if queue.flushDataPtr >= target {
 			break
 		}
@@ -452,6 +682,7 @@ func (queue *QueueDescriptor) flushWait(target int64) {
 
 func (queue *QueueDescriptor) flushLoop() {
 	for {
+		runtime.Gosched()
 		if queue.publishDataWriter.Buffered() == 0 {
 			time.Sleep(500 * time.Microsecond)
 
@@ -470,25 +701,16 @@ func (queue *QueueDescriptor) flushLoop() {
 
 		queue.flushDataMutex.Lock()
 
-		for {
-			queue.publishDataWriterMutex.Lock()
-			err = queue.publishDataWriter.Flush()
-			queue.publishDataWriterMutex.Unlock()
-
-			if err == nil {
-				break
-			}
-
-			if err != io.ErrShortWrite {
-				break
-			}
-		}
+		queue.publishDataWriterMutex.Lock()
+		err = queue.publishDataWriter.Flush()
+		queue.publishDataWriterMutex.Unlock()
 
 		if err != nil {
 			queue.err = err
 			log.Panic(err)
 		}
 		err = queue.publishDataFile.Sync()
+		runtime.Gosched()
 
 		if err != nil {
 			queue.err = err
