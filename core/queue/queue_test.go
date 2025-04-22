@@ -117,7 +117,7 @@ func TestReject(t *testing.T) {
 		MaxPartSize: 100,
 	})
 
-	q := GetQueue("queue1")
+	q := GetQueue("queue2")
 	defer q.Close()
 
 	expected := []core.Message{
@@ -192,7 +192,7 @@ func TestRejectDiscard(t *testing.T) {
 		MaxPartSize: 100,
 	})
 
-	q := GetQueue("queue1")
+	q := GetQueue("queue3")
 	defer q.Close()
 
 	expected := []core.Message{
@@ -267,7 +267,7 @@ func TestRequeue(t *testing.T) {
 		MaxPartSize: 100,
 	})
 
-	q := GetQueue("queue1")
+	q := GetQueue("queue4")
 	defer q.Close()
 
 	expected := []core.Message{
@@ -399,7 +399,7 @@ func TestConsumeThreads(t *testing.T) {
 		MaxPartSize: 10000,
 	})
 
-	q := GetQueue("queue1")
+	q := GetQueue("queue5")
 	defer q.Close()
 
 	threads := 150

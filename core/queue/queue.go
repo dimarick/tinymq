@@ -18,7 +18,7 @@ import (
 
 type QueueDescriptor struct {
 	name                   string
-	closed                 bool
+	refCount               int
 	queueDataPath          string
 	publishRefFile         *os.File
 	consumeRefFileMutex    sync.Mutex
@@ -46,15 +46,23 @@ var queues = make(map[string]*QueueDescriptor)
 
 func GetQueue(name string) *QueueDescriptor {
 	if _, ok := queues[name]; !ok {
-		queues[name] = initQueue(name)
+		queue := initQueue(name)
+		queues[name] = queue
+
+		return queue
 	}
 
 	queue, _ := queues[name]
+	queue.refCount++
 
 	return queue
 }
 func (queue *QueueDescriptor) Close() {
-	queue.closed = true
+	queue.refCount--
+	if queue.refCount > 0 {
+		return
+	}
+
 	runtime.Gosched()
 	time.Sleep(10 * time.Millisecond)
 	queue.publishRefFile.Close()
@@ -66,14 +74,10 @@ func (queue *QueueDescriptor) Close() {
 }
 
 func (queue *QueueDescriptor) Enqueue(operation *core.Operation) {
-	if queue.enqueueAsync(operation) {
-		return
-	}
-
-	queue.publishWait(queue.publishRef.Ptr)
+	queue.EnqueueWait(queue.EnqueueAsync(operation))
 }
 
-func (queue *QueueDescriptor) enqueueAsync(operation *core.Operation) bool {
+func (queue *QueueDescriptor) EnqueueAsync(operation *core.Operation) int64 {
 	if queue.err != nil {
 		log.Panic(queue.err)
 	}
@@ -110,7 +114,8 @@ func (queue *QueueDescriptor) enqueueAsync(operation *core.Operation) bool {
 
 	queue.publishDataWriterMutex.Unlock()
 	queue.triggerFirstWaitingConsumer()
-	return false
+
+	return queue.publishRef.Ptr
 }
 
 func (queue *QueueDescriptor) Consume(consumerId int64, n int, timeout time.Duration) []core.Message {
@@ -118,7 +123,7 @@ func (queue *QueueDescriptor) Consume(consumerId int64, n int, timeout time.Dura
 		log.Panic(queue.err)
 	}
 
-	queue.publishWait(queue.publishRef.Ptr)
+	queue.EnqueueWait(queue.publishRef.Ptr)
 
 	queue.connectedConsumers.Store(consumerId, true)
 
@@ -243,7 +248,7 @@ func (queue *QueueDescriptor) confirm(consumerId int64, messageIds []int64, conf
 			queue.requeue(id, status)
 			ptr := queue.publishRef.Ptr
 			queue.flushStatusWait(id)
-			queue.publishWait(ptr)
+			queue.EnqueueWait(ptr)
 		} else {
 			queue.flushStatusWait(id)
 		}
@@ -302,7 +307,7 @@ func (queue *QueueDescriptor) requeue(fileId int64, status map[int64]core.Messag
 	}
 
 	for _, operation := range operations {
-		queue.enqueueAsync(&core.Operation{
+		queue.EnqueueAsync(&core.Operation{
 			Op:       core.OpRequeue,
 			Target:   operation.Target,
 			Messages: operation.Messages,
@@ -564,6 +569,8 @@ func initQueue(name string) *QueueDescriptor {
 
 		result.rotateConsumeQueuePart(consumeRef.Id)
 
+		result.refCount++
+
 		go result.flushPublishLoop()
 		go result.flushConsumeStatusLoop()
 
@@ -709,19 +716,20 @@ func GetRef(file *os.File) core.Ref {
 	return ref
 }
 
-func (queue *QueueDescriptor) publishWait(target int64) {
+func (queue *QueueDescriptor) EnqueueWait(target int64) {
 	startWait := time.Now().Unix()
 	initialId := queue.publishRef.Id
 	for {
+		if queue.flushDataPtr >= target {
+			break
+		}
+
 		if queue.err != nil {
 			log.Panic(queue.err)
 		}
 
 		time.Sleep(500 * time.Microsecond)
 		runtime.Gosched()
-		if queue.flushDataPtr >= target {
-			break
-		}
 		if initialId != queue.publishRef.Id {
 			break
 		}
@@ -762,7 +770,7 @@ func (queue *QueueDescriptor) consumeStatusWait(fileId int64, target int64) {
 
 func (queue *QueueDescriptor) flushPublishLoop() {
 	for {
-		if queue.closed {
+		if queue.refCount == 0 {
 			break
 		}
 		runtime.Gosched()
@@ -816,7 +824,7 @@ func (queue *QueueDescriptor) flushPublishLoop() {
 
 func (queue *QueueDescriptor) flushConsumeStatusLoop() {
 	for {
-		if queue.closed {
+		if queue.refCount == 0 {
 			break
 		}
 		runtime.Gosched()
