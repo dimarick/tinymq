@@ -19,6 +19,7 @@ import (
 type QueueDescriptor struct {
 	queueDataPath          string
 	publishRefFile         *os.File
+	consumeRefFileMutex    sync.Mutex
 	consumeRefFile         *os.File
 	publishDataFile        *os.File
 	publishDataWriterMutex sync.Mutex
@@ -31,12 +32,12 @@ type QueueDescriptor struct {
 	flushDataMutex         sync.Mutex
 	flushDataPtr           int64
 	messageStatus          *core.MessageStatusMap
-	//messageStatusFileMutex   sync.Mutex
-	//messageStatusFile        map[int64]*os.File
-	connectedConsumers sync.Map
-	consumeMutex       sync.Mutex
-	readerMutex        sync.Mutex
-	err                error
+	messageStatusDirtyTime sync.Map
+	messageStatusSyncTime  sync.Map
+	connectedConsumers     sync.Map
+	consumeMutex           sync.Mutex
+	readerMutex            sync.Mutex
+	err                    error
 }
 
 var queues = make(map[string]*QueueDescriptor)
@@ -56,7 +57,7 @@ func (queue *QueueDescriptor) Enqueue(operation *core.Operation) {
 		return
 	}
 
-	queue.flushWait(queue.publishRef.Ptr)
+	queue.publishWait(queue.publishRef.Ptr)
 }
 
 func (queue *QueueDescriptor) enqueueAsync(operation *core.Operation) bool {
@@ -107,21 +108,37 @@ func (queue *QueueDescriptor) Consume(consumerId int64, n int, timeout time.Dura
 		log.Panic(queue.err)
 	}
 
-	queue.flushWait(queue.publishRef.Ptr)
-
-	queue.consumeMutex.Lock()
-	defer queue.consumeMutex.Unlock()
+	queue.publishWait(queue.publishRef.Ptr)
 
 	queue.connectedConsumers.Store(consumerId, true)
 
-	reader := serializer.NewCountedReader(bufio.NewReader(queue.consumeDataFile))
-	messages := make([]core.Message, 0)
+	messages := queue.readMessages(consumerId, n)
+
+	if len(messages) == 0 {
+		return queue.waitQueueWithTimeout(timeout)
+	}
+
+	queue.flushStatusWait(queue.consumeRef.Id)
+
+	queue.consumeRefFileMutex.Lock()
+	SetRef(queue.consumeRefFile, queue.consumeRef)
+	queue.consumeRefFile.Sync()
+	queue.consumeRefFileMutex.Unlock()
+
+	return messages
+}
+
+func (queue *QueueDescriptor) readMessages(consumerId int64, n int) []core.Message {
+	queue.consumeMutex.Lock()
+	defer queue.consumeMutex.Unlock()
+
 	_, err := queue.consumeDataFile.Seek(queue.consumeRef.Ptr, io.SeekStart)
+	messages := make([]core.Message, 0)
+
+	reader := serializer.NewCountedReader(bufio.NewReader(queue.consumeDataFile))
 
 	if err != nil {
 		log.Panic(err)
-
-		return nil
 	}
 
 	for {
@@ -138,7 +155,7 @@ func (queue *QueueDescriptor) Consume(consumerId int64, n int, timeout time.Dura
 		// At end of file
 		if stat.Size() == queue.consumeRef.Ptr {
 			if queue.consumeRef.Id != queue.publishRef.Id {
-				queue.flushStatus(queue.consumeRef.Id, queue.messageStatus.LoadFile(queue.consumeRef.Id))
+				queue.flushStatusWait(queue.consumeRef.Id)
 				queue.rotateConsumeQueuePart()
 				reader = serializer.NewCountedReader(bufio.NewReader(queue.consumeDataFile))
 				continue
@@ -182,17 +199,9 @@ func (queue *QueueDescriptor) Consume(consumerId int64, n int, timeout time.Dura
 				ConsumerId: consumerId,
 				Status:     core.StatusPending,
 			})
+			queue.consumeRef.Ptr += reader.Count()
 		}
-		queue.consumeRef.Ptr += reader.Count()
 	}
-
-	if len(messages) == 0 {
-		return queue.waitQueueWithTimeout(timeout)
-	}
-	SetRef(queue.consumeRefFile, queue.consumeRef)
-
-	queue.flushStatus(queue.consumeRef.Id, queue.messageStatus.LoadFile(queue.consumeRef.Id))
-	queue.consumeRefFile.Sync()
 
 	return messages
 }
@@ -222,10 +231,10 @@ func (queue *QueueDescriptor) confirm(consumerId int64, messageIds []int64, conf
 		if requeue {
 			queue.requeue(id, status)
 			ptr := queue.publishRef.Ptr
-			queue.flushStatus(id, status)
-			queue.flushWait(ptr)
+			queue.flushStatusWait(id)
+			queue.publishWait(ptr)
 		} else {
-			queue.flushStatus(id, status)
+			queue.flushStatusWait(id)
 		}
 	}
 }
@@ -243,7 +252,7 @@ func (queue *QueueDescriptor) Requeue(consumerId int64, messageIds []int64) {
 }
 
 func (queue *QueueDescriptor) requeue(fileId int64, status map[int64]core.MessageStatus) {
-	operations, err := queue.readMessages(fileId, status)
+	operations, err := queue.readMessagesByIds(fileId, status)
 
 	if err != nil {
 		log.Panic(err)
@@ -258,7 +267,7 @@ func (queue *QueueDescriptor) requeue(fileId int64, status map[int64]core.Messag
 	}
 }
 
-func (queue *QueueDescriptor) readMessages(fileId int64, status map[int64]core.MessageStatus) ([]core.Operation, error) {
+func (queue *QueueDescriptor) readMessagesByIds(fileId int64, status map[int64]core.MessageStatus) ([]core.Operation, error) {
 	queue.readerMutex.Lock()
 	defer queue.readerMutex.Unlock()
 	consumeDataPath := fmt.Sprintf("%s/queue.%d", queue.queueDataPath, fileId)
@@ -328,7 +337,7 @@ func (queue *QueueDescriptor) flushStatus(fileId int64, status map[int64]core.Me
 	consumeDataFile, err := os.OpenFile(consumeDataPath, os.O_RDONLY, 0666)
 
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, os.ErrNotExist) {
 			consumeDataFile = nil
 		} else {
 			log.Panic(err)
@@ -513,7 +522,8 @@ func initQueue(name string) *QueueDescriptor {
 
 		result.messageStatus.StoreFile(consumeRef.Id, result.loadStatus(consumeRef.Id))
 
-		go result.flushLoop()
+		go result.flushPublishLoop()
+		go result.flushConsumeStatusLoop()
 
 		return result
 	}
@@ -660,7 +670,7 @@ func GetRef(file *os.File) core.Ref {
 	return ref
 }
 
-func (queue *QueueDescriptor) flushWait(target int64) {
+func (queue *QueueDescriptor) publishWait(target int64) {
 	startWait := time.Now().Unix()
 	initialId := queue.publishRef.Id
 	for {
@@ -678,12 +688,40 @@ func (queue *QueueDescriptor) flushWait(target int64) {
 		}
 		if (startWait + 10) < time.Now().Unix() {
 			startWait = time.Now().Unix()
-			log.Printf("flushWait is waiting for %d more than 10 seconds for state %d of file %s", target, queue.flushDataPtr, queue.publishDataFile.Name())
+			log.Printf("publishWait is waiting for %d more than 10 seconds for state %d of file %s", target, queue.flushDataPtr, queue.publishDataFile.Name())
 		}
 	}
 }
 
-func (queue *QueueDescriptor) flushLoop() {
+func (queue *QueueDescriptor) consumeStatusWait(fileId int64, target int64) {
+	startWait := time.Now().Unix()
+	for {
+		if queue.err != nil {
+			log.Panic(queue.err)
+		}
+
+		time.Sleep(500 * time.Microsecond)
+		runtime.Gosched()
+		value, ok := queue.messageStatusSyncTime.Load(fileId)
+
+		if !ok {
+			continue
+		}
+
+		syncTime := value.(int64)
+
+		if syncTime >= target {
+			break
+		}
+
+		if (startWait + 10) < time.Now().Unix() {
+			startWait = time.Now().Unix()
+			log.Printf("consumeStatusWait is waiting for %d more than 10 seconds for state %d of file %s", target, queue.flushDataPtr, queue.publishDataFile.Name())
+		}
+	}
+}
+
+func (queue *QueueDescriptor) flushPublishLoop() {
 	for {
 		runtime.Gosched()
 		if queue.publishDataWriter.Buffered() == 0 {
@@ -732,4 +770,40 @@ func (queue *QueueDescriptor) flushLoop() {
 
 		queue.flushDataMutex.Unlock()
 	}
+}
+
+func (queue *QueueDescriptor) flushConsumeStatusLoop() {
+	for {
+		runtime.Gosched()
+		time.Sleep(500 * time.Microsecond)
+		for fileId, status := range queue.messageStatus.RangeFiles() {
+			runtime.Gosched()
+			value, ok := queue.messageStatusDirtyTime.Load(fileId)
+
+			if !ok {
+				continue
+			}
+
+			dirtyTime := value.(int64)
+
+			value, ok = queue.messageStatusSyncTime.Load(fileId)
+
+			syncTime := int64(0)
+			if ok {
+				syncTime = value.(int64)
+			}
+
+			if dirtyTime > syncTime {
+				queue.flushStatus(fileId, status)
+				queue.messageStatusSyncTime.Store(fileId, time.Now().UnixNano())
+			}
+		}
+	}
+}
+
+func (queue *QueueDescriptor) flushStatusWait(fileId int64) {
+	targetTime := time.Now().UnixNano()
+	queue.messageStatusDirtyTime.Store(fileId, targetTime)
+
+	queue.consumeStatusWait(fileId, targetTime)
 }

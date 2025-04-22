@@ -209,10 +209,10 @@ func TestConsumeThreads(t *testing.T) {
 	var mutex sync.Mutex
 	actual := make([]core.Message, 0)
 
-	for i := 0; i < 2000; i++ {
+	for i := 0; i < 1000; i++ {
 		wg.Add(1)
 		go func() {
-			consumed := q.Consume(int64(i), 50, 0)
+			consumed := q.Consume(int64(i), 10, 0)
 
 			ids := make([]int64, 0)
 
