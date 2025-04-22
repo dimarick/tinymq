@@ -17,6 +17,8 @@ import (
 )
 
 type QueueDescriptor struct {
+	name                   string
+	closed                 bool
 	queueDataPath          string
 	publishRefFile         *os.File
 	consumeRefFileMutex    sync.Mutex
@@ -28,7 +30,7 @@ type QueueDescriptor struct {
 	publishRef             core.Ref
 	consumeRef             core.Ref
 	consumerChannelsMutex  sync.Mutex
-	consumerChannels       []chan core.Operation
+	consumerChannels       []chan bool
 	flushDataMutex         sync.Mutex
 	flushDataPtr           int64
 	messageStatus          *core.MessageStatusMap
@@ -51,6 +53,17 @@ func GetQueue(name string) *QueueDescriptor {
 
 	return queue
 }
+func (queue *QueueDescriptor) Close() {
+	queue.closed = true
+	runtime.Gosched()
+	time.Sleep(10 * time.Millisecond)
+	queue.publishRefFile.Close()
+	queue.consumeRefFile.Close()
+	queue.publishDataFile.Close()
+	queue.consumeDataFile.Close()
+
+	delete(queues, queue.name)
+}
 
 func (queue *QueueDescriptor) Enqueue(operation *core.Operation) {
 	if queue.enqueueAsync(operation) {
@@ -63,10 +76,6 @@ func (queue *QueueDescriptor) Enqueue(operation *core.Operation) {
 func (queue *QueueDescriptor) enqueueAsync(operation *core.Operation) bool {
 	if queue.err != nil {
 		log.Panic(queue.err)
-	}
-
-	if queue.directDispatchConsumers(operation) {
-		return true
 	}
 
 	var err error
@@ -96,10 +105,11 @@ func (queue *QueueDescriptor) enqueueAsync(operation *core.Operation) bool {
 	}
 
 	if queue.publishRef.Ptr > config.GetConfig().MaxPartSize {
-		queue.rotatePublishQueuePart()
+		queue.rotatePublishQueuePart(queue.publishRef.Id + 1)
 	}
 
 	queue.publishDataWriterMutex.Unlock()
+	queue.triggerFirstWaitingConsumer()
 	return false
 }
 
@@ -115,15 +125,15 @@ func (queue *QueueDescriptor) Consume(consumerId int64, n int, timeout time.Dura
 	messages := queue.readMessages(consumerId, n)
 
 	if len(messages) == 0 {
-		return queue.waitQueueWithTimeout(timeout)
+		if !queue.waitQueueWithTimeout(timeout) {
+			return messages
+		}
+
+		defer queue.triggerFirstWaitingConsumer()
+		return queue.Consume(consumerId, n, timeout)
 	}
 
 	queue.flushStatusWait(queue.consumeRef.Id)
-
-	queue.consumeRefFileMutex.Lock()
-	SetRef(queue.consumeRefFile, queue.consumeRef)
-	queue.consumeRefFile.Sync()
-	queue.consumeRefFileMutex.Unlock()
 
 	return messages
 }
@@ -156,7 +166,7 @@ func (queue *QueueDescriptor) readMessages(consumerId int64, n int) []core.Messa
 		if stat.Size() == queue.consumeRef.Ptr {
 			if queue.consumeRef.Id != queue.publishRef.Id {
 				queue.flushStatusWait(queue.consumeRef.Id)
-				queue.rotateConsumeQueuePart()
+				queue.rotateConsumeQueuePart(queue.consumeRef.Id + 1)
 				reader = serializer.NewCountedReader(bufio.NewReader(queue.consumeDataFile))
 				continue
 			}
@@ -171,7 +181,7 @@ func (queue *QueueDescriptor) readMessages(consumerId int64, n int) []core.Messa
 			log.Panic(err)
 		}
 
-		if len(operation.Messages) > 1 {
+		if len(operation.Messages) != 1 {
 			log.Panic(errors.New("More than one message is unexpected"))
 		}
 
@@ -199,8 +209,8 @@ func (queue *QueueDescriptor) readMessages(consumerId int64, n int) []core.Messa
 				ConsumerId: consumerId,
 				Status:     core.StatusPending,
 			})
-			queue.consumeRef.Ptr += reader.Count()
 		}
+		queue.consumeRef.Ptr += reader.Count()
 	}
 
 	return messages
@@ -223,6 +233,7 @@ func (queue *QueueDescriptor) confirm(consumerId int64, messageIds []int64, conf
 
 				status[entry.MessageId] = messageStatus
 			}
+
 		}
 	}
 
@@ -237,10 +248,42 @@ func (queue *QueueDescriptor) confirm(consumerId int64, messageIds []int64, conf
 			queue.flushStatusWait(id)
 		}
 	}
+
+	minFileId := queue.consumeRef.Id
+	minFilePtr := queue.consumeRef.Ptr
+	changed := false
+
+	for _, entry := range queue.messageStatus.Range() {
+		if entry.Status.Status == core.StatusReject {
+			if entry.FileId < minFileId {
+				minFileId = entry.FileId
+				minFilePtr = entry.Status.Ptr
+				changed = true
+			} else if entry.FileId == minFileId && entry.Status.Ptr < minFilePtr {
+				minFilePtr = entry.Status.Ptr
+				changed = true
+			}
+		}
+	}
+
+	if changed {
+		queue.consumeMutex.Lock()
+		defer queue.consumeMutex.Unlock()
+
+		queue.consumeRef.Id = minFileId
+		queue.consumeRef.Ptr = minFilePtr
+		SetRef(queue.consumeRefFile, queue.consumeRef)
+		queue.rotateConsumeQueuePart(minFileId)
+		queue.consumeRefFile.Sync()
+	}
 }
 
 func (queue *QueueDescriptor) Ack(consumerId int64, messageIds []int64) {
 	queue.confirm(consumerId, messageIds, core.StatusAck, false)
+}
+
+func (queue *QueueDescriptor) RejectDiscard(consumerId int64, messageIds []int64) {
+	queue.confirm(consumerId, messageIds, core.StatusRejectDiscard, false)
 }
 
 func (queue *QueueDescriptor) Reject(consumerId int64, messageIds []int64) {
@@ -351,7 +394,7 @@ func (queue *QueueDescriptor) flushStatus(fileId int64, status map[int64]core.Me
 			log.Panic(err)
 		}
 
-		if stat.Size() == ackBytes {
+		if ackBytes > 0 && stat.Size() == ackBytes {
 			queue.messageStatus.DeleteFile(fileId)
 			defer os.Remove(consumeDataStatusPath)
 			defer os.Remove(consumeDataPath)
@@ -374,7 +417,11 @@ func (queue *QueueDescriptor) flushStatus(fileId int64, status map[int64]core.Me
 
 func (queue *QueueDescriptor) loadStatus(fileId int64) map[int64]core.MessageStatus {
 	consumeDataStatusPath := fmt.Sprintf("%s/queue.%d.status", queue.queueDataPath, fileId)
-	consumeDataStatusFile, err := os.OpenFile(consumeDataStatusPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
+	consumeDataStatusFile, err := os.OpenFile(consumeDataStatusPath, os.O_RDONLY|os.O_EXCL, 0666)
+
+	if errors.Is(err, os.ErrNotExist) {
+		return map[int64]core.MessageStatus{}
+	}
 
 	if err != nil {
 		log.Panic(err)
@@ -411,8 +458,8 @@ func (queue *QueueDescriptor) loadStatus(fileId int64) map[int64]core.MessageSta
 	return result
 }
 
-func (queue *QueueDescriptor) rotateConsumeQueuePart() {
-	queue.consumeRef.Id++
+func (queue *QueueDescriptor) rotateConsumeQueuePart(fileId int64) {
+	queue.consumeRef.Id = fileId
 	queue.consumeRef.Ptr = 0
 
 	SetRef(queue.consumeRefFile, queue.consumeRef)
@@ -421,9 +468,9 @@ func (queue *QueueDescriptor) rotateConsumeQueuePart() {
 		log.Panic(err)
 	}
 
-	consumeDataFilePath := fmt.Sprintf("%s/queue.%d", queue.queueDataPath, queue.consumeRef.Id)
+	consumeDataPath := fmt.Sprintf("%s/queue.%d", queue.queueDataPath, queue.consumeRef.Id)
 
-	queue.consumeDataFile, err = os.OpenFile(consumeDataFilePath, os.O_RDWR, 0666)
+	queue.consumeDataFile, err = os.OpenFile(consumeDataPath, os.O_RDONLY, 0666)
 
 	if err != nil {
 		log.Panic(err)
@@ -435,6 +482,8 @@ func (queue *QueueDescriptor) rotateConsumeQueuePart() {
 	if err != nil {
 		log.Panic(err)
 	}
+
+	queue.messageStatus.StoreFile(queue.consumeRef.Id, queue.loadStatus(queue.consumeRef.Id))
 }
 
 func initQueue(name string) *QueueDescriptor {
@@ -486,15 +535,8 @@ func initQueue(name string) *QueueDescriptor {
 		consumeRef := GetRef(consumeRefFile)
 
 		publishDataFilePath := fmt.Sprintf("%s/queue.%d", queueDataPath, publishRef.Id)
-		consumeDataFilePath := fmt.Sprintf("%s/queue.%d", queueDataPath, consumeRef.Id)
 
 		publishDataFile, err := os.OpenFile(publishDataFilePath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-
-		if err != nil {
-			log.Panic(err)
-		}
-
-		consumeDataFile, err := os.OpenFile(consumeDataFilePath, os.O_RDWR|os.O_CREATE, 0666)
 
 		if err != nil {
 			log.Panic(err)
@@ -509,18 +551,18 @@ func initQueue(name string) *QueueDescriptor {
 		publishRef.Ptr = stat.Size()
 
 		*result = QueueDescriptor{
+			name:              name,
 			queueDataPath:     queueDataPath,
 			publishRefFile:    publishRefFile,
 			consumeRefFile:    consumeRefFile,
 			publishDataFile:   publishDataFile,
 			publishDataWriter: bufio.NewWriterSize(publishDataFile, 2*int(config.GetConfig().MaxPartSize)),
-			consumeDataFile:   consumeDataFile,
 			publishRef:        publishRef,
 			consumeRef:        consumeRef,
 			messageStatus:     core.NewMessageStatusMap(),
 		}
 
-		result.messageStatus.StoreFile(consumeRef.Id, result.loadStatus(consumeRef.Id))
+		result.rotateConsumeQueuePart(consumeRef.Id)
 
 		go result.flushPublishLoop()
 		go result.flushConsumeStatusLoop()
@@ -531,7 +573,7 @@ func initQueue(name string) *QueueDescriptor {
 	return queue
 }
 
-func (queue *QueueDescriptor) rotatePublishQueuePart() {
+func (queue *QueueDescriptor) rotatePublishQueuePart(fileId int64) {
 	var err error
 
 	err = queue.publishDataWriter.Flush()
@@ -548,7 +590,7 @@ func (queue *QueueDescriptor) rotatePublishQueuePart() {
 
 	prevPublishDataFile := queue.publishDataFile
 
-	queue.publishRef.Id++
+	queue.publishRef.Id = fileId
 
 	publishDataFilePath := fmt.Sprintf("%s/queue.%d", queue.queueDataPath, queue.publishRef.Id)
 
@@ -586,12 +628,12 @@ func (queue *QueueDescriptor) rotatePublishQueuePart() {
 	}()
 }
 
-func (queue *QueueDescriptor) waitQueueWithTimeout(timeout time.Duration) []core.Message {
+func (queue *QueueDescriptor) waitQueueWithTimeout(timeout time.Duration) bool {
 	if timeout == 0 {
-		return make([]core.Message, 0)
+		return false
 	}
 
-	channel := make(chan core.Operation)
+	channel := make(chan bool)
 	queue.consumerChannelsMutex.Lock()
 	queue.consumerChannels = append(queue.consumerChannels, channel)
 	queue.consumerChannelsMutex.Unlock()
@@ -599,19 +641,19 @@ func (queue *QueueDescriptor) waitQueueWithTimeout(timeout time.Duration) []core
 	if timeout > 0 {
 		go func() {
 			time.Sleep(timeout)
-			channel <- core.Operation{}
+			channel <- false
 		}()
 	}
 
-	operation := <-channel
+	hasData := <-channel
 
-	return operation.Messages
+	return hasData
 }
 
-func (queue *QueueDescriptor) directDispatchConsumers(operation *core.Operation) bool {
+func (queue *QueueDescriptor) triggerFirstWaitingConsumer() {
 	queue.consumerChannelsMutex.Lock()
 
-	var channel chan core.Operation
+	var channel chan bool
 	channelValid := false
 
 	if len(queue.consumerChannels) > 0 {
@@ -623,11 +665,8 @@ func (queue *QueueDescriptor) directDispatchConsumers(operation *core.Operation)
 	queue.consumerChannelsMutex.Unlock()
 
 	if channelValid {
-		channel <- *operation
-		return true
+		channel <- true
 	}
-
-	return false
 }
 
 func SetRef(file *os.File, ref core.Ref) {
@@ -723,6 +762,9 @@ func (queue *QueueDescriptor) consumeStatusWait(fileId int64, target int64) {
 
 func (queue *QueueDescriptor) flushPublishLoop() {
 	for {
+		if queue.closed {
+			break
+		}
 		runtime.Gosched()
 		if queue.publishDataWriter.Buffered() == 0 {
 			time.Sleep(500 * time.Microsecond)
@@ -774,6 +816,9 @@ func (queue *QueueDescriptor) flushPublishLoop() {
 
 func (queue *QueueDescriptor) flushConsumeStatusLoop() {
 	for {
+		if queue.closed {
+			break
+		}
 		runtime.Gosched()
 		time.Sleep(500 * time.Microsecond)
 		for fileId, status := range queue.messageStatus.RangeFiles() {

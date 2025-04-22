@@ -16,6 +16,8 @@ const (
 	StatusRequeue = 2
 	// message failed and still here
 	StatusReject = 3
+	// message failed and still here
+	StatusRejectDiscard = 4
 )
 
 type Message struct {

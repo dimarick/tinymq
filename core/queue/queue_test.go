@@ -14,13 +14,14 @@ import (
 )
 
 func TestEnqueue(t *testing.T) {
-	path := fmt.Sprintf("/tmp/queue_test/%d", time.Now().Unix())
+	path := fmt.Sprintf("/tmp/queue_test/1%d", time.Now().Unix())
 	config.InitConfig(config.Settings{
 		StoragePath: &path,
 		MaxPartSize: 100,
 	})
 
 	q := GetQueue("queue1")
+	defer q.Close()
 
 	expected := []core.Message{
 		{
@@ -109,14 +110,240 @@ func TestEnqueue(t *testing.T) {
 	}
 }
 
+func TestReject(t *testing.T) {
+	path := fmt.Sprintf("/tmp/queue_test/2%d", time.Now().Unix())
+	config.InitConfig(config.Settings{
+		StoragePath: &path,
+		MaxPartSize: 100,
+	})
+
+	q := GetQueue("queue1")
+	defer q.Close()
+
+	expected := []core.Message{
+		{
+			ContentType: core.TypeText,
+			Id:          1,
+			Data:        "Message 1",
+		},
+		{
+			ContentType: core.TypeText,
+			Id:          2,
+			Data:        "Message 2",
+		},
+		{
+			ContentType: core.TypeText,
+			Id:          3,
+			Data:        "Message 3",
+		},
+		{
+			ContentType: core.TypeText,
+			Id:          4,
+			Data:        "Message 4",
+		},
+		{
+			ContentType: core.TypeText,
+			Id:          5,
+			Data:        "Message 5",
+		},
+	}
+	q.Enqueue(&core.Operation{
+		Op:       core.OpPublish,
+		Target:   "exchange1",
+		Messages: expected,
+	})
+
+	actual := q.Consume(42, 2, 0)
+	actual = append(actual, q.Consume(42, 1, 0)...)
+	actual = append(actual, q.Consume(42, 1, 0)...)
+	actual = append(actual, q.Consume(42, 5, 0)...)
+
+	ids := make([]int64, 0)
+
+	for _, m := range actual[0:2] {
+		ids = append(ids, m.Id)
+	}
+
+	q.Reject(42, ids)
+
+	ids = make([]int64, 0)
+
+	for _, m := range actual[2:] {
+		ids = append(ids, m.Id)
+	}
+
+	q.Ack(42, ids)
+
+	if !reflect.DeepEqual(actual, expected) {
+		t.Errorf("queue failed, expected %v, actual %v", expected, actual)
+	}
+
+	actual = q.Consume(42, 100, 0)
+
+	if len(actual) != 2 {
+		t.Errorf("consume failed, expected %v, actual %v", 2, len(actual))
+	}
+}
+
+func TestRejectDiscard(t *testing.T) {
+	path := fmt.Sprintf("/tmp/queue_test/2%d", time.Now().Unix())
+	config.InitConfig(config.Settings{
+		StoragePath: &path,
+		MaxPartSize: 100,
+	})
+
+	q := GetQueue("queue1")
+	defer q.Close()
+
+	expected := []core.Message{
+		{
+			ContentType: core.TypeText,
+			Id:          1,
+			Data:        "Message 1",
+		},
+		{
+			ContentType: core.TypeText,
+			Id:          2,
+			Data:        "Message 2",
+		},
+		{
+			ContentType: core.TypeText,
+			Id:          3,
+			Data:        "Message 3",
+		},
+		{
+			ContentType: core.TypeText,
+			Id:          4,
+			Data:        "Message 4",
+		},
+		{
+			ContentType: core.TypeText,
+			Id:          5,
+			Data:        "Message 5",
+		},
+	}
+	q.Enqueue(&core.Operation{
+		Op:       core.OpPublish,
+		Target:   "exchange1",
+		Messages: expected,
+	})
+
+	actual := q.Consume(42, 2, 0)
+	actual = append(actual, q.Consume(42, 1, 0)...)
+	actual = append(actual, q.Consume(42, 1, 0)...)
+	actual = append(actual, q.Consume(42, 5, 0)...)
+
+	ids := make([]int64, 0)
+
+	for _, m := range actual[0:2] {
+		ids = append(ids, m.Id)
+	}
+
+	q.RejectDiscard(42, ids)
+
+	ids = make([]int64, 0)
+
+	for _, m := range actual[2:] {
+		ids = append(ids, m.Id)
+	}
+
+	q.Ack(42, ids)
+
+	if !reflect.DeepEqual(actual, expected) {
+		t.Errorf("queue failed, expected %v, actual %v", expected, actual)
+	}
+
+	actual = q.Consume(42, 100, 0)
+
+	if len(actual) != 0 {
+		t.Errorf("consume failed, expected %v, actual %v", 0, len(actual))
+	}
+}
+
+func TestRequeue(t *testing.T) {
+	path := fmt.Sprintf("/tmp/queue_test/2%d", time.Now().Unix())
+	config.InitConfig(config.Settings{
+		StoragePath: &path,
+		MaxPartSize: 100,
+	})
+
+	q := GetQueue("queue1")
+	defer q.Close()
+
+	expected := []core.Message{
+		{
+			ContentType: core.TypeText,
+			Id:          1,
+			Data:        "Message 1",
+		},
+		{
+			ContentType: core.TypeText,
+			Id:          2,
+			Data:        "Message 2",
+		},
+		{
+			ContentType: core.TypeText,
+			Id:          3,
+			Data:        "Message 3",
+		},
+		{
+			ContentType: core.TypeText,
+			Id:          4,
+			Data:        "Message 4",
+		},
+		{
+			ContentType: core.TypeText,
+			Id:          5,
+			Data:        "Message 5",
+		},
+	}
+	q.Enqueue(&core.Operation{
+		Op:       core.OpPublish,
+		Target:   "exchange1",
+		Messages: expected,
+	})
+
+	actual := q.Consume(42, 2, 0)
+	actual = append(actual, q.Consume(42, 1, 0)...)
+	actual = append(actual, q.Consume(42, 1, 0)...)
+	actual = append(actual, q.Consume(42, 5, 0)...)
+
+	ids := make([]int64, 0)
+
+	for _, m := range actual[0:2] {
+		ids = append(ids, m.Id)
+	}
+
+	q.Requeue(42, ids)
+
+	ids = make([]int64, 0)
+
+	for _, m := range actual[2:] {
+		ids = append(ids, m.Id)
+	}
+
+	q.Ack(42, ids)
+
+	if !reflect.DeepEqual(actual, expected) {
+		t.Errorf("queue failed, expected %v, actual %v", expected, actual)
+	}
+
+	actual = q.Consume(42, 100, 0)
+
+	if len(actual) != 2 {
+		t.Errorf("consume failed, expected %v, actual %v", 2, len(actual))
+	}
+}
+
 func TestEnqueueLarge(t *testing.T) {
-	path := fmt.Sprintf("/tmp/queue_test/%d", time.Now().Unix())
+	path := fmt.Sprintf("/tmp/queue_test/3%d", time.Now().Unix())
 	config.InitConfig(config.Settings{
 		StoragePath: &path,
 		MaxPartSize: 100000,
 	})
 
 	q := GetQueue("queue1")
+	defer q.Close()
 
 	threads := 100000
 	ops := 1
@@ -166,13 +393,14 @@ func TestEnqueueLarge(t *testing.T) {
 }
 
 func TestConsumeThreads(t *testing.T) {
-	path := fmt.Sprintf("/tmp/queue_test/%d", time.Now().Unix())
+	path := fmt.Sprintf("/tmp/queue_test/4%d", time.Now().Unix())
 	config.InitConfig(config.Settings{
 		StoragePath: &path,
 		MaxPartSize: 10000,
 	})
 
 	q := GetQueue("queue1")
+	defer q.Close()
 
 	threads := 150
 	ops := 50

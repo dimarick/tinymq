@@ -19,7 +19,7 @@ func SerializeOperation(buffer []byte, object core.Operation) ([]byte, error) {
 		return nil, err
 	}
 
-	buffer, err = SerializeMessages(buffer, object.Messages)
+	buffer, err = SerializeMessage(buffer, object.Messages[0])
 	if err != nil {
 		return nil, err
 	}
@@ -45,12 +45,12 @@ func DeserializeOperation(reader io.Reader) (core.Operation, error) {
 		return object, err
 	}
 
-	messages, err := DeserializeMessages(reader)
+	messages, err := DeserializeMessage(reader)
 	if err != nil {
 		return object, err
 	}
 
-	object.Messages = messages
+	object.Messages = append(object.Messages, messages)
 
 	return object, nil
 }
