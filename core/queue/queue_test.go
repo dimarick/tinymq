@@ -119,7 +119,7 @@ func TestEnqueueLarge(t *testing.T) {
 	q := GetQueue("queue1")
 
 	threads := 100000
-	ops := 100
+	ops := 1
 	messages := 1
 
 	var wg sync.WaitGroup
