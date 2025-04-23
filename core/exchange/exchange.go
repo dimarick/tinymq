@@ -2,17 +2,20 @@ package exchange
 
 import (
 	"fmt"
+	"log"
 	"math/rand"
 	"time"
+	"tinymq/config"
 	"tinymq/core"
 	"tinymq/core/queue"
 )
 
 type ExchangeDescriptor struct {
-	name          string
-	refCount      int
-	exchangeQueue *queue.QueueDescriptor
-	bindQueues    map[string]*queue.QueueDescriptor
+	name                 string
+	refCount             int
+	exchangeQueue        *queue.QueueDescriptor
+	bindQueues           map[string]*queue.QueueDescriptor
+	deduplicationStorage *core.MessageStorage
 }
 
 var exchanges = make(map[string]*ExchangeDescriptor)
@@ -56,10 +59,11 @@ func initExchange(name string) *ExchangeDescriptor {
 	result := new(ExchangeDescriptor)
 
 	*result = ExchangeDescriptor{
-		name:          name,
-		refCount:      1,
-		exchangeQueue: queue.GetQueue(fmt.Sprintf("exchange.%s.queue", name)),
-		bindQueues:    make(map[string]*queue.QueueDescriptor),
+		name:                 name,
+		refCount:             1,
+		exchangeQueue:        queue.GetQueue(fmt.Sprintf("exchange.%s.queue", name)),
+		bindQueues:           make(map[string]*queue.QueueDescriptor),
+		deduplicationStorage: core.NewMessageStorage(config.GetConfig().DB),
 	}
 
 	exchangeBind, ok := bindings[name]
@@ -86,17 +90,24 @@ func (exchange *ExchangeDescriptor) consumePublishes() {
 
 		messages := exchangeQueue.Consume(consumerId, 1000, 1*time.Second)
 
-		if len(messages) == 0 {
+		filteredMessages, err := exchange.deduplicationStorage.FilterMessages(messages)
+
+		if err != nil {
+			log.Panic(err)
+		}
+
+		if len(filteredMessages) == 0 {
 			continue
 		}
 
 		wait := make(map[string]int64)
 
 		for qname, q := range exchange.bindQueues {
+			log.Printf("Publish %d from %s to %s", len(filteredMessages), exchange.name, qname)
 			wait[qname] = q.EnqueueAsync(&core.Operation{
 				Op:       core.OpPublish,
 				Target:   exchange.name,
-				Messages: messages,
+				Messages: filteredMessages,
 			})
 		}
 
@@ -108,12 +119,19 @@ func (exchange *ExchangeDescriptor) consumePublishes() {
 			}
 
 			q.EnqueueWait(target)
+			log.Printf("Published %d from %s to %s", len(filteredMessages), exchange.name, qname)
 		}
 
 		ids := make([]int64, 0)
 
-		for _, m := range messages {
-			ids = append(ids, m.Id)
+		err = exchange.deduplicationStorage.SetMessages(filteredMessages)
+		if err != nil {
+			log.Panic(err)
+		}
+
+		err = exchange.deduplicationStorage.Sync()
+		if err != nil {
+			log.Panic(err)
 		}
 
 		exchangeQueue.Ack(consumerId, ids)

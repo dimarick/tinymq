@@ -3,9 +3,11 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/akrylysov/pogreb"
 	"log"
 	"net/http"
 	"tinymq/config"
+	"tinymq/core"
 	"tinymq/declare"
 	"tinymq/message"
 )
@@ -14,6 +16,17 @@ func main() {
 	globalConfig := config.Settings{}
 	port := flag.Int("port", 8080, "port to listen on")
 	globalConfig.StoragePath = flag.String("storagePath", "./var", "path to storage")
+	dbPath := flag.String("hashtable", "", "file with deduplication database")
+	if *dbPath != "" {
+		db, err := pogreb.Open(*dbPath, nil)
+		if err != nil {
+			log.Panic(err)
+		}
+
+		globalConfig.DB = db
+	} else {
+		globalConfig.DB = new(core.NullStorage)
+	}
 
 	config.InitConfig(globalConfig)
 

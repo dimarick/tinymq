@@ -1,10 +1,14 @@
 package config
 
-import "log"
+import (
+	"log"
+	"tinymq/core"
+)
 
 type Settings struct {
 	StoragePath *string
 	MaxPartSize int64
+	DB          core.DeduplicationStorage
 }
 
 var globalConfig Settings
