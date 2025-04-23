@@ -123,9 +123,13 @@ func (storage *MessageStorage) delete(key int64) error {
 }
 
 func (storage *MessageStorage) Sync() error {
+	storage.mutex.Lock()
+	defer storage.mutex.Unlock()
 	return storage.db.Sync()
 }
 
 func (storage *MessageStorage) Close() error {
+	storage.mutex.Lock()
+	defer storage.mutex.Unlock()
 	return storage.db.Close()
 }
