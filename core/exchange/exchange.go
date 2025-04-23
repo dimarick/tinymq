@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"sync"
 	"time"
 	"tinymq/config"
 	"tinymq/core"
@@ -19,7 +20,14 @@ type ExchangeDescriptor struct {
 }
 
 var exchanges = make(map[string]*ExchangeDescriptor)
+
+var bindingsMutex sync.Mutex
 var bindings = make(map[string][]string)
+
+func HasBindings(exchangeName string) bool {
+	_, ok := bindings[exchangeName]
+	return ok
+}
 
 func GetExchange(name string) *ExchangeDescriptor {
 	if _, ok := exchanges[name]; !ok {
@@ -136,4 +144,25 @@ func (exchange *ExchangeDescriptor) consumePublishes() {
 
 		exchangeQueue.Ack(consumerId, ids)
 	}
+}
+
+func Bind(exchange string, queue string) {
+	bindingsMutex.Lock()
+	defer bindingsMutex.Unlock()
+	if _, ok := bindings[exchange]; !ok {
+		bindings[exchange] = make([]string, 0)
+	}
+	bindings[exchange] = append(bindings[exchange], queue)
+}
+
+func HasQueue(name string) bool {
+	for _, queues := range bindings {
+		for _, q := range queues {
+			if q == name {
+				return true
+			}
+		}
+	}
+
+	return false
 }

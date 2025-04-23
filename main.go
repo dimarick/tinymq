@@ -1,14 +1,16 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/akrylysov/pogreb"
 	"log"
 	"net/http"
+	"os"
 	"tinymq/config"
 	"tinymq/core"
-	"tinymq/declare"
+	"tinymq/core/exchange"
 	"tinymq/message"
 )
 
@@ -28,20 +30,30 @@ func main() {
 		globalConfig.DB = new(core.NullStorage)
 	}
 
-	config.InitConfig(globalConfig)
+	exchangesPath := flag.String("exchanges", "", "json file with exchanges config")
 
-	http.HandleFunc("GET /exchanges", declare.GetExchangesHandler)
-	http.HandleFunc("POST /exchanges", declare.PostExchangesHandler)
-	http.HandleFunc("DELETE /exchange/{exchange}", declare.DeleteExchangeHandler)
-	http.HandleFunc("GET /queues", declare.GetQueuesHandler)
-	http.HandleFunc("POST /queues", declare.PostQueuesHandler)
-	http.HandleFunc("DELETE /queue/{queue}", declare.DeleteQueueHandler)
-	http.HandleFunc("GET /bind/{exchange}", declare.GetBindHandler)
-	http.HandleFunc("POST /bind/{exchange}/{queue}", declare.PostBindHandler)
-	http.HandleFunc("DELETE /bind/{exchange}/{queue}", declare.DeleteBindHandler)
+	exchangeJson, err := os.ReadFile(*exchangesPath)
+
+	if err != nil {
+		log.Panic(err)
+	}
+
+	bindings := map[string][]string{}
+
+	err = json.Unmarshal(exchangeJson, &bindings)
+
+	if err != nil {
+		log.Panic(err)
+	}
+
+	for exchangeName, queues := range bindings {
+		for _, queueName := range queues {
+			exchange.Bind(exchangeName, queueName)
+		}
+	}
+
 	http.HandleFunc("POST /publish/{exchange}", message.PostPublishHandler)
-	http.HandleFunc("PUT /publish/{exchange}", message.PutPublishHandler)
-	http.HandleFunc("GET /consume/{queue}", message.ConsumeHandler)
+	http.HandleFunc("GET /consume/{queue}/{count}", message.ConsumeHandler)
 	server := fmt.Sprintf(":%d", *port)
 	log.Fatal(http.ListenAndServe(server, nil))
 }

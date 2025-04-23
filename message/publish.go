@@ -3,25 +3,40 @@ package message
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
+	"sync"
 	"tinymq/core"
+	"tinymq/core/exchange"
 	"tinymq/http_core"
 )
 
+var exchangeObjectsMutex sync.Mutex
+var exchangeObjects = make(map[string]*exchange.ExchangeDescriptor)
+
 func PostPublishHandler(w http.ResponseWriter, r *http.Request) {
-	_, err := fmt.Fprintf(w, "P %s", r.URL.Path[0:])
-	if err != nil {
-		log.Fatal(err)
+	exchangeName := r.PathValue("exchange")
+
+	if exchange.HasBindings(exchangeName) {
+		http_core.ShowResponse(w, http_core.Response{
+			Status: http.StatusNotFound,
+			Header: http.Header{},
+			Body:   "Exchange not found",
+		})
+
+		return
 	}
-}
 
-func PutPublishHandler(w http.ResponseWriter, r *http.Request) {
-	//exchange := r.PathValue("exchange")
 	contentType := r.Header.Get("Content-Type")
+	var t uint8
 
-	if contentType != "application/json" {
+	if contentType == "application/json" {
+		t = core.TypeJson
+	} else if contentType == "application/octet-stream" {
+		t = core.TypeBinary
+	} else if contentType == "text/plain" {
+		t = core.TypeText
+	} else {
 		w.WriteHeader(http.StatusBadRequest)
 		_, err := w.Write([]byte("Content-Type must be application/json"))
 
@@ -34,22 +49,38 @@ func PutPublishHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	messages := []core.Message{}
+	var messages []core.Message
 	err := json.NewDecoder(r.Body).Decode(&messages)
 	if err != nil {
 		http_core.ShowError(w, "Failed to read request", err)
 		return
 	}
 
-	//op_log.RegisterOperation(core.Operation{
-	//	Op:       core.OpPublishUnique,
-	//	Target:   exchange,
-	//	Messages: messages,
-	//})
+	for _, msg := range messages {
+		msg.ContentType = t
+	}
+
+	exchangeObject := getExchange(exchangeName)
+
+	exchangeObject.Publish(&core.Operation{
+		Op:       core.OpPublish,
+		Target:   exchangeName,
+		Messages: messages,
+	})
 
 	http_core.ShowResponse(w, http_core.Response{
 		Status: http.StatusOK,
 		Header: http.Header{},
-		Body:   "Published messages",
 	})
+}
+
+func getExchange(exchangeName string) *exchange.ExchangeDescriptor {
+	exchangeObjectsMutex.Lock()
+	defer exchangeObjectsMutex.Unlock()
+	exchangeObject, ok := exchangeObjects[exchangeName]
+	if !ok {
+		exchangeObject = exchange.GetExchange(exchangeName)
+		exchangeObjects[exchangeName] = exchangeObject
+	}
+	return exchangeObject
 }
