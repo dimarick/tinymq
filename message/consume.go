@@ -3,6 +3,7 @@ package message
 import (
 	"encoding/json"
 	"github.com/gorilla/websocket"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -57,15 +58,24 @@ func ConsumeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	defer conn.Close()
+	defer func(conn *websocket.Conn) {
+		err := conn.Close()
+		if err != nil {
+			log.Panic(err)
+		}
+	}(conn)
 
 	consumerId := rand.Int63()
 
-	// The event loop
 	for {
-		messages := q.Consume(consumerId, n, 1*time.Second)
+		for {
+			messages := q.Consume(consumerId, n, 1*time.Second)
 
-		sendMessage(conn, messages)
+			if len(messages) > 0 {
+				sendMessage(conn, messages)
+				break
+			}
+		}
 
 		messageType, message, err := conn.ReadMessage()
 		if err != nil {
@@ -103,7 +113,12 @@ func ConsumeHandler(w http.ResponseWriter, r *http.Request) {
 
 func sendMessage(conn *websocket.Conn, message any) {
 	writer, err := conn.NextWriter(websocket.TextMessage)
-	defer writer.Close()
+	defer func(writer io.WriteCloser) {
+		err := writer.Close()
+		if err != nil {
+			log.Panic(err)
+		}
+	}(writer)
 
 	if err != nil {
 		log.Panic(err)

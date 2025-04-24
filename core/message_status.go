@@ -97,10 +97,10 @@ func (m *MessageStatusMap) RangeFiles() map[int64]map[int64]MessageStatus {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	rows := make(map[int64]map[int64]MessageStatus, 0)
+	rows := make(map[int64]map[int64]MessageStatus)
 
 	for fileId, status := range m.m {
-		rows[fileId] = make(map[int64]MessageStatus, 0)
+		rows[fileId] = make(map[int64]MessageStatus)
 		for messageId, messageStatus := range status {
 			rows[fileId][messageId] = messageStatus
 		}

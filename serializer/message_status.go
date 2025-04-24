@@ -88,7 +88,7 @@ func DeserializeMessageStatuses(reader io.Reader) (map[int64]core.MessageStatus,
 		return map[int64]core.MessageStatus{}, err
 	}
 
-	objects := make(map[int64]core.MessageStatus, 0)
+	objects := make(map[int64]core.MessageStatus)
 
 	for i := int32(0); i < messageCount; i++ {
 		id, object, err := DeserializeMessageStatus(reader)

@@ -40,7 +40,7 @@ func PostPublishHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, err := w.Write([]byte("Content-Type must be application/json"))
 
-		http_core.ShowError(w, "Content-Type must be application/json", errors.New("Invalid type"))
+		http_core.ShowError(w, "Content-Type must be application/json", errors.New("invalid type"))
 
 		if err != nil {
 			log.Print("Failed to publish", err)

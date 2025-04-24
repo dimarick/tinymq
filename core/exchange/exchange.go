@@ -16,7 +16,7 @@ type ExchangeDescriptor struct {
 	refCount             int
 	exchangeQueue        *queue.QueueDescriptor
 	bindQueues           map[string]*queue.QueueDescriptor
-	deduplicationStorage *core.MessageStorage
+	deduplicationStorage config.MessageStorageInterface
 }
 
 var exchanges = make(map[string]*ExchangeDescriptor)
@@ -71,7 +71,7 @@ func initExchange(name string) *ExchangeDescriptor {
 		refCount:             1,
 		exchangeQueue:        queue.GetQueue(fmt.Sprintf("exchange.%s.queue", name)),
 		bindQueues:           make(map[string]*queue.QueueDescriptor),
-		deduplicationStorage: core.NewMessageStorage(config.GetConfig().DB),
+		deduplicationStorage: config.GetConfig().DB,
 	}
 
 	exchangeBind, ok := bindings[name]

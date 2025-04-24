@@ -86,7 +86,7 @@ func DeserializeMessages(reader io.Reader) ([]core.Message, error) {
 
 	objects := make([]core.Message, messageCount)
 
-	for i, _ := range objects {
+	for i := range objects {
 		object, err := DeserializeMessage(reader)
 		if err != nil {
 			return nil, err

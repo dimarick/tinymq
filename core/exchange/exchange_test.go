@@ -9,6 +9,7 @@ import (
 	"tinymq/config"
 	"tinymq/core"
 	"tinymq/core/queue"
+	"tinymq/core/storage"
 )
 
 func TestPublish(t *testing.T) {
@@ -16,7 +17,7 @@ func TestPublish(t *testing.T) {
 	config.InitConfig(config.Settings{
 		StoragePath: &path,
 		MaxPartSize: 100,
-		DB:          core.NewNullStorage(),
+		DB:          storage.NewNullMessageStorage(),
 	})
 
 	e := GetExchange("e1")
@@ -94,7 +95,7 @@ func TestPublish(t *testing.T) {
 
 func TestPublishWithDeduplicate(t *testing.T) {
 	path := fmt.Sprintf("/tmp/queue_test/1%d", time.Now().Unix())
-	open, err := pogreb.Open(fmt.Sprintf("%s/db", path), nil)
+	db, err := pogreb.Open(fmt.Sprintf("%s/db", path), nil)
 
 	if err != nil {
 		t.Error(err)
@@ -103,7 +104,7 @@ func TestPublishWithDeduplicate(t *testing.T) {
 	config.InitConfig(config.Settings{
 		StoragePath: &path,
 		MaxPartSize: 100,
-		DB:          open,
+		DB:          storage.NewMessageStorage(db),
 	})
 
 	e := GetExchange("e1")

@@ -8,9 +8,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 	"tinymq/config"
-	"tinymq/core"
 	"tinymq/core/exchange"
+	"tinymq/core/storage"
 	"tinymq/message"
 )
 
@@ -25,10 +26,13 @@ func main() {
 			log.Panic(err)
 		}
 
-		globalConfig.DB = db
+		globalConfig.DB = storage.NewMessageStorage(db)
 	} else {
-		globalConfig.DB = new(core.NullStorage)
+		globalConfig.DB = storage.NewNullMessageStorage()
 	}
+
+	globalConfig.StatCollectorInterval = 10 * time.Minute
+	globalConfig.GarbageCollectorInterval = 1 * time.Minute
 
 	exchangesPath := flag.String("exchanges", "", "json file with exchanges config")
 
