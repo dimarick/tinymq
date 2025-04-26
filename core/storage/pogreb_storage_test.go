@@ -28,7 +28,9 @@ func TestFilterMessages(t *testing.T) {
 	})
 
 	s := NewMessageStorage(db)
-	defer s.Close()
+	defer func() {
+		_ = s.Close()
+	}()
 
 	expected := []core.Message{
 		{
@@ -91,8 +93,9 @@ func TestGC(t *testing.T) {
 	})
 
 	s := NewMessageStorage(db)
-	defer s.Close()
-
+	defer func() {
+		_ = s.Close()
+	}()
 	expected := []core.Message{
 		{
 			ContentType: core.TypeText,

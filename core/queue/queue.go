@@ -392,8 +392,19 @@ func (queue *QueueDescriptor) flushStatus(fileId int64, status map[int64]core.Me
 
 		if ackBytes > 0 && stat.Size() == ackBytes {
 			queue.messageStatus.DeleteFile(fileId)
-			defer os.Remove(consumeDataStatusPath)
-			defer os.Remove(consumeDataPath)
+			defer func() {
+				err = os.Remove(consumeDataStatusPath)
+
+				if err != nil {
+					_, _ = fmt.Fprintf(os.Stderr, "Cannot cleanup file %s", consumeDataStatusPath)
+				}
+
+				err = os.Remove(consumeDataPath)
+				if err != nil {
+					_, _ = fmt.Fprintf(os.Stderr, "Cannot cleanup file %s", consumeDataPath)
+				}
+			}()
+
 			return
 		}
 	}
