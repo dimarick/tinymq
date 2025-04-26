@@ -20,7 +20,7 @@ func TestFilterMessages(t *testing.T) {
 	}
 
 	config.InitConfig(config.Settings{
-		StoragePath:              &path,
+		StoragePath:              path,
 		MaxPartSize:              100,
 		StorageMaxItems:          10000000,
 		StatCollectorInterval:    10 * time.Hour,
@@ -83,7 +83,7 @@ func TestGC(t *testing.T) {
 	}
 
 	config.InitConfig(config.Settings{
-		StoragePath:              &path,
+		StoragePath:              path,
 		MaxPartSize:              100,
 		StorageMaxItems:          3,
 		StatCollectorInterval:    10 * time.Hour,

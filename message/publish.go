@@ -17,7 +17,7 @@ var exchangeObjects = make(map[string]*exchange.ExchangeDescriptor)
 func PostPublishHandler(w http.ResponseWriter, r *http.Request) {
 	exchangeName := r.PathValue("exchange")
 
-	if exchange.HasBindings(exchangeName) {
+	if !exchange.HasBindings(exchangeName) {
 		http_core.ShowResponse(w, http_core.Response{
 			Status: http.StatusNotFound,
 			Header: http.Header{},
@@ -38,7 +38,7 @@ func PostPublishHandler(w http.ResponseWriter, r *http.Request) {
 		t = core.TypeText
 	} else {
 		w.WriteHeader(http.StatusBadRequest)
-		_, err := w.Write([]byte("Content-Type must be application/json"))
+		_, err := w.Write([]byte("Content-Type must be set"))
 
 		http_core.ShowError(w, "Content-Type must be application/json", errors.New("invalid type"))
 

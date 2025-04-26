@@ -7,7 +7,7 @@ import (
 )
 
 type Settings struct {
-	StoragePath              *string
+	StoragePath              string
 	MaxPartSize              int64
 	DB                       MessageStorageInterface
 	StorageMaxItems          int64

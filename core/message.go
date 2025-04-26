@@ -13,10 +13,8 @@ const (
 	StatusAck = 1
 	// StatusRequeue message failed and pushed to queue end
 	StatusRequeue = 2
-	// StatusReject message failed and still here
+	// StatusReject message failed and removed from queue
 	StatusReject = 3
-	// StatusRejectDiscard message failed and still here
-	StatusRejectDiscard = 4
 )
 
 type Message struct {

@@ -52,6 +52,7 @@ func (exchange *ExchangeDescriptor) Close() {
 		for _, q := range exchange.bindQueues {
 			q.Close()
 		}
+		delete(exchanges, exchange.name)
 	}
 }
 
@@ -111,7 +112,6 @@ func (exchange *ExchangeDescriptor) consumePublishes() {
 		wait := make(map[string]int64)
 
 		for qname, q := range exchange.bindQueues {
-			log.Printf("Publish %d from %s to %s", len(filteredMessages), exchange.name, qname)
 			wait[qname] = q.EnqueueAsync(&core.Operation{
 				Op:       core.OpPublish,
 				Target:   exchange.name,
@@ -127,10 +127,14 @@ func (exchange *ExchangeDescriptor) consumePublishes() {
 			}
 
 			q.EnqueueWait(target)
-			log.Printf("Published %d from %s to %s", len(filteredMessages), exchange.name, qname)
+			q.TriggerWaitingConsumers()
 		}
 
 		ids := make([]int64, 0)
+
+		for _, message := range filteredMessages {
+			ids = append(ids, message.Id)
+		}
 
 		err = exchange.deduplicationStorage.SetMessages(filteredMessages)
 		if err != nil {

@@ -15,7 +15,7 @@ import (
 func TestPublish(t *testing.T) {
 	path := fmt.Sprintf("/tmp/queue_test/1%d", time.Now().Unix())
 	config.InitConfig(config.Settings{
-		StoragePath: &path,
+		StoragePath: path,
 		MaxPartSize: 100,
 		DB:          storage.NewNullMessageStorage(),
 	})
@@ -78,7 +78,9 @@ func TestPublish(t *testing.T) {
 	} {
 
 		actual := q.Consume(42, 6, 0)
-		actual = append(actual, q.Consume(42, 6, 1*time.Second)...)
+		if len(actual) != len(expected) {
+			actual = append(actual, q.Consume(42, 6, 1*time.Second)...)
+		}
 
 		if !reflect.DeepEqual(actual, expected) {
 			t.Errorf("queue failed, expected %v, actual %v", expected, actual)
@@ -102,7 +104,7 @@ func TestPublishWithDeduplicate(t *testing.T) {
 	}
 
 	config.InitConfig(config.Settings{
-		StoragePath: &path,
+		StoragePath: path,
 		MaxPartSize: 100,
 		DB:          storage.NewMessageStorage(db),
 	})
@@ -165,7 +167,10 @@ func TestPublishWithDeduplicate(t *testing.T) {
 	} {
 
 		actual := q.Consume(42, 6, 0)
-		actual = append(actual, q.Consume(42, 6, 1*time.Second)...)
+
+		if len(actual) != len(expected) {
+			actual = append(actual, q.Consume(42, 6, 1*time.Second)...)
+		}
 
 		if !reflect.DeepEqual(actual, expected) {
 			t.Errorf("queue failed, expected %v, actual %v", expected, actual)

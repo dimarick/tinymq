@@ -27,8 +27,6 @@ func ShowResponse(w http.ResponseWriter, response Response) {
 	}
 
 	w.WriteHeader(response.Status)
-
-	w.WriteHeader(response.Status)
 	_, err = w.Write(responseBody)
 	if err != nil {
 		log.Println("Failed to send response", err)

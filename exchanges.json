@@ -1,0 +1,10 @@
+{
+  "exchange1": [
+    "queue1",
+    "queue2"
+  ],
+  "exchange2": [
+    "queue2",
+    "queue3"
+  ]
+}

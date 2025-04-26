@@ -16,10 +16,14 @@ import (
 )
 
 func main() {
-	globalConfig := config.Settings{}
 	port := flag.Int("port", 8080, "port to listen on")
-	globalConfig.StoragePath = flag.String("storagePath", "./var", "path to storage")
+	storagePath := flag.String("storagePath", "./var", "path to storage")
 	dbPath := flag.String("hashtable", "", "file with deduplication database")
+	exchangesPath := flag.String("exchanges", "", "json file with exchanges config")
+	flag.Parse()
+
+	globalConfig := config.Settings{}
+	globalConfig.StoragePath = *storagePath
 	if *dbPath != "" {
 		db, err := pogreb.Open(*dbPath, nil)
 		if err != nil {
@@ -33,8 +37,6 @@ func main() {
 
 	globalConfig.StatCollectorInterval = 10 * time.Minute
 	globalConfig.GarbageCollectorInterval = 1 * time.Minute
-
-	exchangesPath := flag.String("exchanges", "", "json file with exchanges config")
 
 	exchangeJson, err := os.ReadFile(*exchangesPath)
 
@@ -55,6 +57,8 @@ func main() {
 			exchange.Bind(exchangeName, queueName)
 		}
 	}
+
+	config.InitConfig(globalConfig)
 
 	http.HandleFunc("POST /publish/{exchange}", message.PostPublishHandler)
 	http.HandleFunc("GET /consume/{queue}/{count}", message.ConsumeHandler)

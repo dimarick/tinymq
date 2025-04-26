@@ -51,6 +51,10 @@ func (stat *storageStat) collectStat(storage config.MessageStorageInterface) (*s
 			}
 		}
 
+		if minValue == 0 {
+			return result, nil
+		}
+
 		result.minValue = minValue
 	}
 
@@ -158,7 +162,7 @@ func (stat *storageStat) incrementStat(value int64, n int) {
 
 	valueRangeId := int(float32(value-stat.minValue) / stat.rangeWidth)
 
-	if valueRangeId > len(stat.histogram) {
+	if valueRangeId >= len(stat.histogram) || valueRangeId < 0 {
 		return
 	}
 
