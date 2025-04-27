@@ -575,7 +575,7 @@ func initQueue(name string) *QueueDescriptor {
 
 		result.refCount++
 
-		go result.flushPublishLoop()
+		go result.flushEnqueueLoop()
 		go result.flushConsumeStatusLoop()
 
 		return result
@@ -754,7 +754,7 @@ func (queue *QueueDescriptor) consumeStatusWait(fileId int64, target int64) {
 	}
 }
 
-func (queue *QueueDescriptor) flushPublishLoop() {
+func (queue *QueueDescriptor) flushEnqueueLoop() {
 	queue.backgroundTasks.Add(1)
 	for {
 		if queue.refCount == 0 {

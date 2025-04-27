@@ -37,6 +37,8 @@ func main() {
 
 	globalConfig.StatCollectorInterval = 10 * time.Minute
 	globalConfig.GarbageCollectorInterval = 1 * time.Minute
+	globalConfig.MaxPartSize = 1000
+	globalConfig.StorageMaxItems = 1000
 
 	exchangeJson, err := os.ReadFile(*exchangesPath)
 
