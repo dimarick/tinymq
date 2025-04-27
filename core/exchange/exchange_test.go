@@ -97,7 +97,7 @@ func TestPublish(t *testing.T) {
 
 func TestPublishWithDeduplicate(t *testing.T) {
 	path := fmt.Sprintf("/tmp/queue_test/1%d", time.Now().Unix())
-	db, err := pogreb.Open(fmt.Sprintf("%s/db", path), nil)
+	db, err := pogreb.Open(fmt.Sprintf("%s/db2", path), nil)
 
 	if err != nil {
 		t.Error(err)

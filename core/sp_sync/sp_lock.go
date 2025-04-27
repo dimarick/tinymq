@@ -38,7 +38,7 @@ func IntCompare(target any) func(any) bool {
 		case int:
 			return value.(int) >= target.(int)
 		case int32:
-			return value.(int32) >= target.(int32)
+			return int32(value.(int)) >= target.(int32)
 		case int64:
 			return value.(int64) >= target.(int64)
 		default:

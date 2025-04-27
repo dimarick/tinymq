@@ -10,7 +10,7 @@ import (
 
 func TestIntCompare(t *testing.T) {
 	fn := IntCompare(int32(1000))
-	fn64 := IntCompare(10000000000000)
+	fn64 := IntCompare(int64(10000000000000))
 
 	actual := []bool{
 		fn(999),
@@ -18,11 +18,11 @@ func TestIntCompare(t *testing.T) {
 		fn(1001),
 		fn(0),
 		fn(-1),
-		fn64(10000000000000 - 1),
-		fn64(10000000000000),
-		fn64(10000000000000 + 1),
-		fn64(0),
-		fn64(-1),
+		fn64(int64(10000000000000 - 1)),
+		fn64(int64(10000000000000)),
+		fn64(int64(10000000000000 + 1)),
+		fn64(int64(0)),
+		fn64(int64(-1)),
 	}
 
 	expected := []bool{
