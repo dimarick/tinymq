@@ -127,7 +127,6 @@ func (exchange *ExchangeDescriptor) consumePublishes() {
 			}
 
 			q.EnqueueWait(target)
-			q.TriggerWaitingConsumers()
 		}
 
 		ids := make([]int64, 0)

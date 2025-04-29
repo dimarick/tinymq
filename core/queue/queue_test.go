@@ -14,7 +14,7 @@ import (
 )
 
 func TestEnqueue(t *testing.T) {
-	path := fmt.Sprintf("/tmp/queue_test/1%d", time.Now().Unix())
+	path := fmt.Sprintf("/tmp/queue_test/1%d", time.Now().UnixNano())
 	config.InitConfig(config.Settings{
 		StoragePath: path,
 		MaxPartSize: 100,
@@ -111,7 +111,7 @@ func TestEnqueue(t *testing.T) {
 }
 
 func TestEnqueueWait(t *testing.T) {
-	path := fmt.Sprintf("/tmp/queue_test/2%d", time.Now().Unix())
+	path := fmt.Sprintf("/tmp/queue_test/2%d", time.Now().UnixNano())
 	config.InitConfig(config.Settings{
 		StoragePath: path,
 		MaxPartSize: 100,
@@ -176,7 +176,7 @@ func TestEnqueueWait(t *testing.T) {
 }
 
 func TestReject(t *testing.T) {
-	path := fmt.Sprintf("/tmp/queue_test/3%d", time.Now().Unix())
+	path := fmt.Sprintf("/tmp/queue_test/3%d", time.Now().UnixNano())
 	config.InitConfig(config.Settings{
 		StoragePath: path,
 		MaxPartSize: 100,
@@ -251,7 +251,7 @@ func TestReject(t *testing.T) {
 }
 
 func TestRequeue(t *testing.T) {
-	path := fmt.Sprintf("/tmp/queue_test/6%d", time.Now().Unix())
+	path := fmt.Sprintf("/tmp/queue_test/6%d", time.Now().UnixNano())
 	config.InitConfig(config.Settings{
 		StoragePath: path,
 		MaxPartSize: 100,
@@ -325,8 +325,79 @@ func TestRequeue(t *testing.T) {
 	}
 }
 
+func TestDetachConsumer(t *testing.T) {
+	path := fmt.Sprintf("/tmp/queue_test/7%d", time.Now().UnixNano())
+	config.InitConfig(config.Settings{
+		StoragePath: path,
+		MaxPartSize: 100,
+	})
+
+	q := GetQueue("queue5")
+	defer q.Close()
+
+	expected := []core.Message{
+		{
+			ContentType: core.TypeText,
+			Id:          1,
+			Data:        "Message 1",
+		},
+		{
+			ContentType: core.TypeText,
+			Id:          2,
+			Data:        "Message 2",
+		},
+		{
+			ContentType: core.TypeText,
+			Id:          3,
+			Data:        "Message 3",
+		},
+		{
+			ContentType: core.TypeText,
+			Id:          4,
+			Data:        "Message 4",
+		},
+		{
+			ContentType: core.TypeText,
+			Id:          5,
+			Data:        "Message 5",
+		},
+	}
+	q.Enqueue(&core.Operation{
+		Op:       core.OpPublish,
+		Target:   "exchange1",
+		Messages: expected,
+	})
+
+	actual := q.Consume(42, 2, 0)
+	actual2 := q.Consume(43, 5, 0)
+
+	if !reflect.DeepEqual(actual, expected[0:2]) {
+		t.Errorf("queue failed, expected %v, actual %v", expected, actual)
+	}
+
+	if !reflect.DeepEqual(actual2, expected[2:]) {
+		t.Errorf("queue failed, expected %v, actual %v", expected, actual2)
+	}
+
+	wg := sync.WaitGroup{}
+	var actual3 []core.Message
+	go func() {
+		wg.Add(1)
+		defer wg.Done()
+		actual3 = q.Consume(42, 100, 1*time.Second)
+	}()
+
+	q.DetachConsumer(42)
+
+	wg.Wait()
+
+	if !reflect.DeepEqual(actual3, expected[0:2]) {
+		t.Errorf("queue failed, expected %v, actual %v", expected, actual3)
+	}
+}
+
 func TestEnqueueLarge(t *testing.T) {
-	path := fmt.Sprintf("/tmp/queue_test/7%d", time.Now().Unix())
+	path := fmt.Sprintf("/tmp/queue_test/7%d", time.Now().UnixNano())
 	config.InitConfig(config.Settings{
 		StoragePath: path,
 		MaxPartSize: 100000,
@@ -383,7 +454,7 @@ func TestEnqueueLarge(t *testing.T) {
 }
 
 func TestConsumeThreads(t *testing.T) {
-	path := fmt.Sprintf("/tmp/queue_test/8%d", time.Now().Unix())
+	path := fmt.Sprintf("/tmp/queue_test/8%d", time.Now().UnixNano())
 	config.InitConfig(config.Settings{
 		StoragePath: path,
 		MaxPartSize: 10000,

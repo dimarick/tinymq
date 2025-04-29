@@ -25,6 +25,8 @@ type MessageStorageInterface interface {
 	Items() ItemsIterator
 	Next(items ItemsIterator) ([]byte, []byte, error)
 	Delete(key []byte) error
+	StartBackgroundWorkers()
+	StopBackgroundWorkers()
 }
 
 var globalConfig Settings

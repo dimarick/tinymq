@@ -3,7 +3,10 @@ package storage
 import (
 	"encoding/binary"
 	"github.com/akrylysov/pogreb"
+	"log"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 	"tinymq/config"
 	"tinymq/core"
@@ -15,35 +18,14 @@ type PogrebStorage struct {
 	db                             *pogreb.DB
 	stat                           *storageStat
 	statCollectorTransactionsCount uint64
+	backgroundWorkers              sync.WaitGroup
+	stopped                        atomic.Bool
 }
 
 func NewMessageStorage(db *pogreb.DB) *PogrebStorage {
 	storage := new(PogrebStorage)
 	storage.db = db
 	storage.stat = new(storageStat)
-	//
-	//go func() {
-	//	for {
-	//		time.Sleep(config.GetConfig().StatCollectorInterval)
-	//		err := storage.CollectStat()
-	//		runtime.Gosched()
-	//
-	//		if err != nil {
-	//			log.Panic(err)
-	//		}
-	//	}
-	//}()
-	//
-	//go func() {
-	//	for {
-	//		time.Sleep(config.GetConfig().GarbageCollectorInterval)
-	//		err := storage.GC(config.GetConfig().StorageMaxItems)
-	//		runtime.Gosched()
-	//		if err != nil {
-	//			log.Panic(err)
-	//		}
-	//	}
-	//}()
 
 	return storage
 }
@@ -159,6 +141,47 @@ func (storage *PogrebStorage) Close() error {
 	storage.mutex.Lock()
 	defer storage.mutex.Unlock()
 	return storage.db.Close()
+}
+
+func (storage *PogrebStorage) StartBackgroundWorkers() {
+
+	go func() {
+		storage.backgroundWorkers.Add(1)
+		defer storage.backgroundWorkers.Done()
+		for {
+			if storage.stopped.Load() {
+				break
+			}
+			time.Sleep(config.GetConfig().StatCollectorInterval)
+			err := storage.CollectStat()
+			runtime.Gosched()
+
+			if err != nil {
+				log.Panic(err)
+			}
+		}
+	}()
+
+	go func() {
+		storage.backgroundWorkers.Add(1)
+		defer storage.backgroundWorkers.Done()
+		for {
+			if storage.stopped.Load() {
+				break
+			}
+			time.Sleep(config.GetConfig().GarbageCollectorInterval)
+			err := storage.GC(config.GetConfig().StorageMaxItems)
+			runtime.Gosched()
+			if err != nil {
+				log.Panic(err)
+			}
+		}
+	}()
+
+}
+func (storage *PogrebStorage) StopBackgroundWorkers() {
+	storage.stopped.Store(true)
+	storage.backgroundWorkers.Wait()
 }
 
 func (storage *PogrebStorage) GC(items int64) error {

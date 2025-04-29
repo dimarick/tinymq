@@ -65,5 +65,10 @@ func main() {
 	http.HandleFunc("POST /publish/{exchange}", message.PostPublishHandler)
 	http.HandleFunc("GET /consume/{queue}/{count}", message.ConsumeHandler)
 	server := fmt.Sprintf(":%d", *port)
+
+	globalConfig.DB.StartBackgroundWorkers()
+	defer globalConfig.DB.StopBackgroundWorkers()
+
 	log.Fatal(http.ListenAndServe(server, nil))
+
 }

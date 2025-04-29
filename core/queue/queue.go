@@ -74,7 +74,6 @@ func (queue *QueueDescriptor) Close() {
 
 func (queue *QueueDescriptor) Enqueue(operation *core.Operation) {
 	queue.EnqueueWait(queue.EnqueueAsync(operation))
-	queue.TriggerWaitingConsumers()
 }
 
 func (queue *QueueDescriptor) EnqueueAsync(operation *core.Operation) int64 {
@@ -152,13 +151,30 @@ func (queue *QueueDescriptor) DetachConsumer(consumerId int64) {
 	}
 
 	var ids []int64
+	filesToRequeue := make(map[int64]map[int64]core.MessageStatus)
 	for _, entry := range queue.messageStatus.Range() {
 		if entry.Status.Status == core.StatusPending && entry.Status.ConsumerId == consumerId {
 			ids = append(ids, entry.MessageId)
+
+			_, ok := filesToRequeue[entry.FileId]
+
+			if !ok {
+				filesToRequeue[entry.FileId] = make(map[int64]core.MessageStatus)
+			}
+
+			filesToRequeue[entry.FileId][entry.MessageId] = entry.Status
 		}
 	}
 
-	queue.Reject(consumerId, ids)
+	log.Printf("Requeue %d %v", consumerId, ids)
+
+	for fileId, statuses := range filesToRequeue {
+		queue.requeueByStatus(fileId, statuses)
+	}
+
+	if len(ids) > 0 {
+		queue.Reject(consumerId, ids)
+	}
 	queue.connectedConsumers.Delete(consumerId)
 }
 
@@ -241,7 +257,7 @@ func (queue *QueueDescriptor) readMessages(consumerId int64, n int) []core.Messa
 	return messages
 }
 
-func (queue *QueueDescriptor) confirm(consumerId int64, messageIds []int64, confirmStatus uint8, requeue bool) {
+func (queue *QueueDescriptor) confirm(consumerId int64, messageIds []int64, confirmStatus uint8) {
 	filesProcessed := make(map[int64]map[int64]core.MessageStatus, 0)
 	for _, entry := range queue.messageStatus.Range() {
 		for _, messageId := range messageIds {
@@ -265,33 +281,26 @@ func (queue *QueueDescriptor) confirm(consumerId int64, messageIds []int64, conf
 	for id, status := range filesProcessed {
 		queue.flushStatusAsync(id)
 		queue.messageStatus.StoreFile(id, status)
-		if requeue {
-			queue.requeue(id, status)
-			ptr := queue.publishRef.Ptr
-			queue.flushStatusWait(id)
-			queue.EnqueueWait(ptr)
-		} else {
-			queue.flushStatusWait(id)
-		}
+		queue.flushStatusWait(id)
 	}
 }
 
 func (queue *QueueDescriptor) Ack(consumerId int64, messageIds []int64) {
-	queue.confirm(consumerId, messageIds, core.StatusAck, false)
+	queue.confirm(consumerId, messageIds, core.StatusAck)
 }
 
 func (queue *QueueDescriptor) Reject(consumerId int64, messageIds []int64) {
-	queue.confirm(consumerId, messageIds, core.StatusReject, false)
-	queue.TriggerWaitingConsumers()
+
+	queue.confirm(consumerId, messageIds, core.StatusReject)
 }
 
 func (queue *QueueDescriptor) Requeue(consumerId int64, messageIds []int64) {
-	queue.confirm(consumerId, messageIds, core.StatusRequeue, true)
-	queue.TriggerWaitingConsumers()
+	queue.requeueByIds(messageIds)
+	queue.confirm(consumerId, messageIds, core.StatusRequeue)
 }
 
-func (queue *QueueDescriptor) requeue(fileId int64, status map[int64]core.MessageStatus) {
-	operations, err := queue.readMessagesByIds(fileId, status)
+func (queue *QueueDescriptor) requeueByStatus(fileId int64, status map[int64]core.MessageStatus) {
+	operations, err := queue.readMessagesByPtr(fileId, status)
 
 	if err != nil {
 		log.Panic(err)
@@ -306,7 +315,30 @@ func (queue *QueueDescriptor) requeue(fileId int64, status map[int64]core.Messag
 	}
 }
 
-func (queue *QueueDescriptor) readMessagesByIds(fileId int64, status map[int64]core.MessageStatus) ([]core.Operation, error) {
+func (queue *QueueDescriptor) requeueByIds(messageIds []int64) {
+	filesProcessed := make(map[int64]map[int64]core.MessageStatus, 0)
+	for _, entry := range queue.messageStatus.Range() {
+		for _, messageId := range messageIds {
+			messageStatus := entry.Status
+
+			if entry.MessageId == messageId {
+				status, ok := filesProcessed[entry.FileId]
+				if !ok {
+					status = map[int64]core.MessageStatus{}
+					filesProcessed[entry.FileId] = status
+				}
+
+				status[entry.MessageId] = messageStatus
+			}
+		}
+	}
+
+	for fileId, statuses := range filesProcessed {
+		queue.requeueByStatus(fileId, statuses)
+	}
+}
+
+func (queue *QueueDescriptor) readMessagesByPtr(fileId int64, status map[int64]core.MessageStatus) ([]core.Operation, error) {
 	queue.readerMutex.Lock()
 	defer queue.readerMutex.Unlock()
 	consumeDataPath := fmt.Sprintf("%s/queue.%d", queue.queueDataPath, fileId)
@@ -321,10 +353,6 @@ func (queue *QueueDescriptor) readMessagesByIds(fileId int64, status map[int64]c
 	defer consumeDataFile.Close()
 
 	for _, messageStatus := range status {
-		if messageStatus.Status != core.StatusRequeue {
-			continue
-		}
-
 		_, err = consumeDataFile.Seek(messageStatus.Ptr, io.SeekStart)
 
 		if err != nil {
@@ -648,7 +676,7 @@ func (queue *QueueDescriptor) waitQueueWithTimeout(target int64, timeout time.Du
 	return err == nil
 }
 
-func (queue *QueueDescriptor) TriggerWaitingConsumers() {
+func (queue *QueueDescriptor) triggerWaitingConsumers() {
 	now := time.Now().UnixNano()
 	queue.consumerWaitLock.UnlockReached(now)
 }
@@ -801,6 +829,7 @@ func (queue *QueueDescriptor) flushEnqueueLoop() {
 		}
 
 		queue.flushDataLock.UnlockReached([]int64{queue.publishRef.Id, stat.Size()})
+		queue.triggerWaitingConsumers()
 	}
 	queue.backgroundTasks.Done()
 }

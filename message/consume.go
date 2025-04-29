@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -35,6 +36,9 @@ type Confirmed struct {
 	Method     string
 	MessageIds []int64
 }
+
+var ErrSocket = errors.New("Socket error")
+var ErrTimeout = errors.New("Socket timeout")
 
 func ConsumeHandler(w http.ResponseWriter, r *http.Request) {
 	queueName := r.PathValue("queue")
@@ -68,57 +72,78 @@ func ConsumeHandler(w http.ResponseWriter, r *http.Request) {
 		log.Panic(err)
 	}
 
-	defer func(conn *websocket.Conn) {
-		err := conn.Close()
-		if err != nil {
-			log.Panic(err)
-		}
-	}(conn)
-
-	closed := false
+	defer func() {
+		_ = conn.Close()
+	}()
 
 	consumerId := rand.Int63()
 
-	for {
-		var messages []core.Message
+	log.Printf("Consumer %d connected", consumerId)
+
+	var messages []core.Message
+
+	messageMutex := sync.Mutex{}
+
+	closed := false
+
+	defer func() {
+		closed = true
+	}()
+
+	go func() {
 		for {
-			messages = q.Consume(consumerId, n, 200*time.Millisecond)
+			if closed {
+				break
+			}
+			if len(messages) == 0 {
+				m := q.Consume(consumerId, n, 200*time.Millisecond)
+				messageMutex.Lock()
+				messages = m
+				messageMutex.Unlock()
+			} else {
+				runtime.Gosched()
+				time.Sleep(time.Millisecond)
+				continue
+			}
 
 			if len(messages) > 0 {
 				err := sendMessage(conn, messages)
 				if err != nil {
 					showErrorWebsocket(conn, "Consume error", err)
 				}
-				break
-			} else {
-				if closed {
-					q.DetachConsumer(consumerId)
-					return
-				}
-
-				err = conn.WriteControl(websocket.PingMessage, []byte("tnmq"), time.Now().Add(time.Second))
 				if err != nil {
-					showErrorWebsocket(conn, "Ping error", err)
-					closed = true
+					log.Panic(err)
 				}
 			}
 		}
+	}()
 
+	for {
 		var confirm Confirm
 
 		err := readMessages(conn, &confirm)
+
+		if errors.Is(err, ErrSocket) {
+			showErrorWebsocket(conn, "socket error", err)
+			q.DetachConsumer(consumerId)
+			_ = conn.Close()
+			break
+		}
+
 		if err != nil {
 			showErrorWebsocket(conn, err.Error(), err)
-			q.DetachConsumer(consumerId)
-			return
+			continue
 		}
 
 		ids := []int64{}
+
+		messageMutex.Lock()
 
 		for _, m := range messages {
 			ids = append(ids, m.Id)
 		}
 
+		messageMutex.Unlock()
 		switch confirm.Method {
 		case "ack":
 			q.Ack(consumerId, ids)
@@ -131,19 +156,23 @@ func ConsumeHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		messages = []core.Message{}
+
 		err = sendMessage(conn, Confirmed{Method: confirm.Method, MessageIds: ids})
 		if err != nil {
 			showErrorWebsocket(conn, "sendMessage error", err)
 			q.DetachConsumer(consumerId)
 			_ = conn.Close()
+			break
 		}
 	}
 }
 
 func readMessages(conn *websocket.Conn, value any) error {
 	messageType, message, err := conn.ReadMessage()
+
 	if err != nil {
-		showErrorWebsocket(conn, "Socket error", err)
+		return fmt.Errorf("socket error %w %w", ErrSocket, err)
 	}
 	log.Printf("Received: %s", message)
 
@@ -153,8 +182,6 @@ func readMessages(conn *websocket.Conn, value any) error {
 
 	err = json.Unmarshal(message, value)
 	if err != nil {
-
-		_ = conn.Close()
 		return errors.Join(
 			errors.New(fmt.Sprintf("Message parse error: %s", message)),
 			err,

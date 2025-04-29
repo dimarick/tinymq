@@ -37,3 +37,9 @@ func (storage *NullMessageStorage) Items() config.ItemsIterator {
 func (storage *NullMessageStorage) Next(config.ItemsIterator) ([]byte, []byte, error) {
 	return nil, nil, errors.New("not implemented")
 }
+func (storage *NullMessageStorage) StartBackgroundWorkers() {
+
+}
+func (storage *NullMessageStorage) StopBackgroundWorkers() {
+
+}
