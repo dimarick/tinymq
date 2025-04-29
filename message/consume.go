@@ -38,7 +38,6 @@ type Confirmed struct {
 }
 
 var ErrSocket = errors.New("Socket error")
-var ErrTimeout = errors.New("Socket timeout")
 
 func ConsumeHandler(w http.ResponseWriter, r *http.Request) {
 	queueName := r.PathValue("queue")
